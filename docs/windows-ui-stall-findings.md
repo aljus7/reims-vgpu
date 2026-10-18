@@ -62,3 +62,7 @@ Temporary env-gated timestamps (removed) on doorbell writes (0x1020), stamp-inte
 
 So neither the compositor nor the client computes or blocks on the vGPU for long. The 250 ms to multi-second gaps between a stamp acknowledgement and the next doorbell are a wait for an event nobody is producing (likely a display-link / vsync-style tick or a frame-completion notification the guest expects from the device). Next lead: check which display events the device sends (`new_frame` callback, display interrupt bit, present-complete) against what the guest's `AppleParavirtGPU` driver waits for.
 
+
+## Cold app launch: Weather (measured)
+
+Launching Weather, which was not open before, with a 12 s `sample` of it: the guest frame rate swings between 0 and 38/s with 1.4-4 s idle gaps. Weather's main thread spends ~15% of samples in `CAEmitterLayer` commits that decode HEIF particle images in software (`HEIFReadPlugin` -> `CA::Render::copy_image`), plus vImage ARGB conversions; the rest is idle in the run loop. So slow first-time assets are guest CPU work on the vCPUs (no hardware image decode in the VM), not vGPU commands or disk: with the work available the pipeline reaches 26-38 frames/s.
