@@ -57,7 +57,7 @@ public partial class MainWindow : Window
     {
         var info = new ProcessStartInfo("pwsh.exe")
         {
-            RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = System.Text.Encoding.UTF8, StandardErrorEncoding = System.Text.Encoding.UTF8, UseShellExecute = false, CreateNoWindow = true,
             WorkingDirectory = _root!,
         };
         foreach (var a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Script(script) }.Concat(args)) info.ArgumentList.Add(a);
