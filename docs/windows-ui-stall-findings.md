@@ -70,3 +70,7 @@ Launching Weather, which was not open before, with a 12 s `sample` of it: the gu
 ### Cold launch: Apple TV / App Store
 
 Sampling Apple TV (10 s) found its main thread 100% blocked in a synchronous XPC call: `ACAccountStore saveVerifiedAccount` (AppleMediaServices) waiting for `accountsd`. It is not GPU, host or CPU work. These apps wait on account/network services (no signed-in Apple ID in the VM), which is the likely cause of their multi-second hangs. Frames during the launch: bursts of 15-30/s between 1-5 s idle gaps.
+
+### Cold launch: Chess (3D, no iCloud)
+
+Chess launch: 0-18 frames/s with 1-6 s gaps, GPU 1.1-3.5 ms per frame. A 10 s sample of Chess shows the main thread mostly waiting, but the busy samples are in `libGLProgrammability` (`glvmSamplerSample`, `glvmInterpretFPTransformFour`), which is Apple's CPU software OpenGL shader interpreter. The legacy OpenGL path falls back to software rendering in this guest (no GL driver on the vGPU), so GL-based apps pay per-pixel guest-CPU cost; Metal paths use the host GPU.
