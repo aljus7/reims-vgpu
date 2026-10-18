@@ -30,15 +30,17 @@ Review the scripts before allowing it to install software.
 
 ## Get the source and build
 
-Clone the branch, including the pinned QEMU submodule:
+Clone the branch. Do not use `--recurse-submodules`: QEMU has nested optional
+submodules with paths that exceed Windows' default path limit, and this build
+does not need to check them all out. The project bootstrap initializes its
+pinned top-level QEMU submodule:
 
 ```powershell
-git clone --branch windows-native-tahoe --recurse-submodules https://github.com/aljus7/reims-vgpu.git
+git clone --branch windows-native-tahoe https://github.com/aljus7/reims-vgpu.git
 cd reims-vgpu
 ```
 
-If you already cloned without submodules, `bootstrap.ps1` initializes the
-pinned QEMU checkout. Run the build and checks from the repository root:
+Run the build and checks from the repository root:
 
 ```powershell
 .\scripts\windows\bootstrap.ps1

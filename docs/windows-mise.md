@@ -14,8 +14,16 @@ on Rust code and to invoke the documented Windows workflows consistently.
 ## One-time setup
 
 Install mise using one of the [official Windows installation methods](https://mise.jdx.dev/installing-mise.html#windows-winget)
-if it is not already available, then open PowerShell 7.2 or newer and go to the
-repository root:
+if it is not already available, then clone the Windows branch without
+recursively cloning QEMU's nested optional submodules:
+
+```powershell
+git clone --branch windows-native-tahoe https://github.com/aljus7/reims-vgpu.git G:\reims-vgpu
+Set-Location G:\reims-vgpu
+```
+
+The project bootstrap initializes the pinned QEMU checkout needed for its
+build. Open PowerShell 7.2 or newer in the repository root:
 
 ```powershell
 mise --version
