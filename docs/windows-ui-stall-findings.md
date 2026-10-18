@@ -51,3 +51,14 @@ Temporary env-gated timestamps (removed) on doorbell writes (0x1020), stamp-inte
 - The guest disk is not the cause: 4 KiB random reads take 0.23 ms, sequential reads 342 MB/s. Guest sleep timers are accurate.
 - The guest is ~93% idle during this, so it waits on something other than CPU or disk between the ack and the next submission (a WindowServer/driver wait). Finding what needs guest-side tracing (sample/dtrace needs root, which the guest does not give over SSH without a password).
 
+
+## Guest samples during Mission Control (measured)
+
+10 s `sample` of WindowServer and Dock while animating (as root over SSH):
+
+- WindowServer main thread: 91% of samples idle in `mach_msg` (waiting for work), ~7.5% in the display timer pass compositing (`CompositorMetal` -> `CA::OGL::render`). The Core Animation render-server thread is 98% in `mach_msg`.
+- Texture releases (`MTLIOAccelTexture dealloc` -> `IOConnectCallMethod`) block a WindowServer worker for ~1% of samples; `setPurgeableState` calls for ~0.5%.
+- Dock: every thread idle (`__workq_kernreturn`, `mach_msg`, `psynch_cvwait`); no CPU work.
+
+So neither the compositor nor the client computes or blocks on the vGPU for long. The 250 ms to multi-second gaps between a stamp acknowledgement and the next doorbell are a wait for an event nobody is producing (likely a display-link / vsync-style tick or a frame-completion notification the guest expects from the device). Next lead: check which display events the device sends (`new_frame` callback, display interrupt bit, present-complete) against what the guest's `AppleParavirtGPU` driver waits for.
+
