@@ -561,17 +561,35 @@ impl HostVm for WindowsVm {
         if split(&mut views, first).is_err() || split(&mut views, end).is_err() {
             return INVALID_ADDRESS;
         }
-        let bases: Vec<_> = views.range(first..end).map(|(&base, _)| base).collect();
-        if bases.is_empty() {
+        let spans: Vec<_> = views
+            .range(first..end)
+            .map(|(&base, view)| (base, view.length))
+            .collect();
+        if spans.is_empty() {
             return INVALID_ADDRESS;
         }
-        for base in bases {
-            unmap(base);
-            // SAFETY: releases the exact owned placeholder after its view is gone.
-            if unsafe { VirtualFree(ptr(base), 0, MEM_RELEASE) } == 0 {
+        // Adjacent placeholders are coalesced so each contiguous run is released once.
+        let mut i = 0;
+        while i < spans.len() {
+            let (run, mut run_length) = spans[i];
+            unmap(run);
+            let mut count = 1;
+            while i + count < spans.len() && spans[i + count].0 == run + run_length {
+                unmap(spans[i + count].0);
+                run_length += spans[i + count].1;
+                count += 1;
+            }
+            if count > 1 {
+                coalesce(run, run_length);
+            }
+            // SAFETY: releases the exact owned placeholder after its views are gone.
+            if unsafe { VirtualFree(ptr(run), 0, MEM_RELEASE) } == 0 {
                 cannot_restore("VirtualFree release placeholder");
             }
-            views.remove(&base);
+            for (base, _) in &spans[i..i + count] {
+                views.remove(base);
+            }
+            i += count;
         }
         files::forget(first, length);
         KernReturn::SUCCESS
