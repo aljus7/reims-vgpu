@@ -74,3 +74,7 @@ Sampling Apple TV (10 s) found its main thread 100% blocked in a synchronous XPC
 ### Cold launch: Chess (3D, no iCloud)
 
 Chess launch: 0-18 frames/s with 1-6 s gaps, GPU 1.1-3.5 ms per frame. A 10 s sample of Chess shows the main thread mostly waiting, but the busy samples are in `libGLProgrammability` (`glvmSamplerSample`, `glvmInterpretFPTransformFour`), which is Apple's CPU software OpenGL shader interpreter. The legacy OpenGL path falls back to software rendering in this guest (no GL driver on the vGPU), so GL-based apps pay per-pixel guest-CPU cost; Metal paths use the host GPU.
+
+### vsynctester.com in Safari
+
+Steady state: 45-59 frames/s (max gap 20-60 ms, GPU 2-3.4 ms/frame), so the vGPU path sustains near-60 fps for a single animating surface. Frame rate collapses to 2-21/s with 0.5-1.5 s gaps only when the window set changes (maximise, app launch), as in the other cold-start cases. The Safari GPU-process sample shows CPU rasterisation in QuartzCore (`CA::OGL::Shape::FillRenderer::render_lines`, `CA::ScanConverter`): shape fills run through Core Animation's software scan converter on the guest CPU.
