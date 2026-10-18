@@ -98,3 +98,7 @@ With one vsynctester tab loaded: a steady 55-60 frames/s (gap ~19 ms). Opening C
 ### Correction: the Control Center repro was a cold app launch
 
 A WindowServer sample with the popover open is ~100% idle, so compositing the popover is not the bottleneck. `top` during a scripted click showed Tips launching (65% CPU) and `iconservicesagent` at 42%, i.e. my approximate click coordinates launched a cold app, and the 18-27 fps dip is the same first-launch icon/asset CPU work seen elsewhere, competing with Safari's WebKit processes for the 8 vCPUs. The earlier 'blurred popover' explanation is withdrawn; the user's real Control Center click still needs a manual repro.
+
+### Intermittent vsynctester dips (steady state)
+
+Over two 90-110 s runs with a single vsynctester tab and nothing else touched: 60 fps almost all the time (gaps ~18-20 ms), with short dips: one to 10-30 fps for ~2 s (gap up to 260 ms) and several of 41-50 fps (gaps 45-95 ms). Guest per-process CPU (`top`, which itself costs ~24%) showed Safari WebKit ~22%, WindowServer ~19%, kernel_task ~18%; the only coinciding background load seen was a `WeatherWidget` burst (~22%) and WebKit bursts to 25-26%. GPU time stays ~2 ms, no host-side stall appeared. Likely causes: guest background daemons (widgets, mds, icon/asset caches) taking vCPU time, or host scheduling of the QEMU threads; not proven. To isolate: disable widgets / Spotlight in the guest, or log host-side per-thread CPU alongside.
