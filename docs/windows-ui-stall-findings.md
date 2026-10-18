@@ -86,3 +86,7 @@ Guest exposes AVX2 and 8 vCPUs. During a cold Freeform launch, `MTLCompilerServi
 ### Why iconservicesagent is slow
 
 Sampled the user `iconservicesagent` while 5 apps launched cold. The busy threads are in `ISGenerationRequest generateImageReturningRecordIdentifiers` -> `ISIconStackAssetCatalogResource layerDataForSize` -> IconRendering, which renders the layered Tahoe icons in software: `CGImageIsInside_sRGB` colour-gamut scans of FP16 images, vImage conversions, `RGBAf16_mark_inner` blits and `lzfse` compression of the cached result. Everything is CPU image work in the guest; no GPU, disk or vGPU wait. It runs once per icon and size, then the cache is hit, which is why System Settings was slow only the first time.
+
+### vsynctester x3 + Control Center / Wi-Fi click
+
+With three vsynctester tabs, the first scripted click on Control Center/Wi-Fi coincided with 0-4 frames/s for ~13 s (this overlapped page load, so it is not a clean measurement). A second run with everything loaded held a steady ~20-31 frames/s (gaps 55-80 ms, 10 fps at the first click) while clicking Control Center and Wi-Fi; no multi-second stall reproduced. A 10 s WindowServer sample in that window was ~100% idle waits (`mach_msg`, `workq`, `semaphore_timedwait`) with only a little `CA::Render::Updater::prepare_layer0`. The scripted click coordinates are approximate, so the popover may not have opened; the user's observed drop is not reproduced.
