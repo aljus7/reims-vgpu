@@ -90,3 +90,7 @@ Sampled the user `iconservicesagent` while 5 apps launched cold. The busy thread
 ### vsynctester x3 + Control Center / Wi-Fi click
 
 With three vsynctester tabs, the first scripted click on Control Center/Wi-Fi coincided with 0-4 frames/s for ~13 s (this overlapped page load, so it is not a clean measurement). A second run with everything loaded held a steady ~20-31 frames/s (gaps 55-80 ms, 10 fps at the first click) while clicking Control Center and Wi-Fi; no multi-second stall reproduced. A 10 s WindowServer sample in that window was ~100% idle waits (`mach_msg`, `workq`, `semaphore_timedwait`) with only a little `CA::Render::Updater::prepare_layer0`. The scripted click coordinates are approximate, so the popover may not have opened; the user's observed drop is not reproduced.
+
+### Reproduced: single vsynctester + Control Center
+
+With one vsynctester tab loaded: a steady 55-60 frames/s (gap ~19 ms). Opening Control Center and the Wi-Fi view drops it to 18-27 frames/s (gaps 45-115 ms) for as long as the popover is up, and it returns to 54-60/s when closed. No multi-second stall, and GPU time stays ~2 ms, so the cost is the extra compositing of the blurred/translucent popover (CPU-side in QuartzCore), not the vGPU. Reduce Transparency is the likely mitigation and still needs a manual toggle.
