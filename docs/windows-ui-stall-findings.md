@@ -30,3 +30,9 @@ Windows deallocate now unmaps every view of a contiguous run, coalesces the plac
 - One earlier permanent freeze at the login screen was not reproduced.
 - scripts/windows/guest-perf-tweaks.sh sets METAL_ERROR_MODE=5 (Recovery or running macOS) plus the optional animation tweaks.
 
+
+## Where the time goes (measured)
+
+- Window fps equals guest fps in every stats sample; GPU time is 1.3-2.4 ms/frame. FIFO and the missing present fences are not the limit (the RX 6600 driver lists no swapchain_maintenance1).
+- During Mission Control bursts the guest is ~93% idle (WindowServer 3-8% CPU, ControlCenter ~29% briefly). It is waiting, not computing: next lead is what WindowServer waits on (display-link/vsync event or a host reply) between bursts.
+
