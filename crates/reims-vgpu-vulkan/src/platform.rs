@@ -305,6 +305,9 @@ pub(crate) fn device_options() -> &'static rt::DeviceOptions {
         crate::os::add_window_extensions(&mut options);
         options.metal_level = crate::os::METAL_LEVEL;
         options.gpu_times_from_host = true;
+        if std::env::var_os("REIMS_VGPU_WITHHOLD_GENERATED_COMMANDS").is_some() {
+            options.withhold_generated_commands = true;
+        }
         options.policy = exact_policy(std::env::var("REIMS_VGPU_EXACT").ok().as_deref());
         options.messages = Some(rt::MessageSink::new(crate::answer::notice));
         options.announce_each = crate::answer::DIES

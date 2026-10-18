@@ -305,6 +305,7 @@ New-Item -ItemType Directory -Force -Path $run | Out-Null
 Write-ReimsJson (Join-Path $run 'command.json') $launch
 $env:REIMS_VGPU_LOG = 'info'
 $env:REIMS_VGPU_STATS = '1'
+$env:REIMS_VGPU_WITHHOLD_GENERATED_COMMANDS = '1'
 if ($config.PSObject.Properties['usb_backend'] -and $config.usb_backend -eq 'usbdk') { $env:REIMS_USB_BACKEND = 'usbdk' }
 else { Remove-Item Env:REIMS_USB_BACKEND -ErrorAction SilentlyContinue }
 if ($Headless) { $env:REIMS_VGPU_WINDOW = '0' } else { Remove-Item Env:REIMS_VGPU_WINDOW -ErrorAction SilentlyContinue }

@@ -1,0 +1,37 @@
+[tools]
+rust = { version = "1.98.1", profile = "minimal", components = ["rustfmt", "clippy"], targets = ["x86_64-pc-windows-gnu"] }
+
+[tasks."windows:bootstrap"]
+description = "Initialize the pinned Windows build dependencies"
+run = "echo This task requires Windows and PowerShell 7.2 or newer."
+run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\bootstrap.ps1"
+
+[tasks."windows:build"]
+description = "Build Reims vGPU, the option ROM, and patched Windows QEMU"
+run = "echo This task requires Windows and PowerShell 7.2 or newer."
+run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\build.ps1 -Profile release"
+
+[tasks."windows:verify"]
+description = "Run the native Windows verification checks"
+run = "echo This task requires Windows and PowerShell 7.2 or newer."
+run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\verify.ps1"
+
+[tasks."windows:doctor"]
+description = "Check Windows build prerequisites and WHPX readiness"
+run = "echo This task requires Windows and PowerShell 7.2 or newer."
+run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\doctor.ps1"
+
+[tasks."windows:vm-dry-run"]
+description = "Validate the default VM launch command without starting QEMU"
+run = "echo This task requires Windows and PowerShell 7.2 or newer."
+run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\start.ps1 -DryRun"
+
+[tasks."windows:export"]
+description = "Export a standalone runtime from the prepared source VM"
+run = "echo This task requires Windows and PowerShell 7.2 or newer."
+run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\Export-Runtime.ps1 -RecoveryImage vm\\media\\Tahoe-Recovery-GPT.img -Destination final"
+
+[tasks."windows:package"]
+description = "Create a runtime ZIP outside final, excluding Apple Recovery media"
+run = "echo This task requires Windows and PowerShell 7.2 or newer."
+run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\Package-Runtime.ps1 -RuntimeRoot final -Destination artifacts\\reims-vgpu-windows-runtime.zip"

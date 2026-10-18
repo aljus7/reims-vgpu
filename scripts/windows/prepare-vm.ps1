@@ -31,12 +31,13 @@ $listing = Invoke-ReimsTool $SevenZip @('l', '-slt', $Iso)
 $listing | Set-Content -LiteralPath (Join-Path $inspection 'contents.txt') -Encoding utf8NoBOM
 $paths = @($listing | Where-Object { $_ -like 'Path = *' } | ForEach-Object { $_.Substring(7) })
 $versionPath = $paths | Where-Object { $_.Replace('\', '/') -match '(^|/)System/Library/CoreServices/SystemVersion\.plist$' } | Select-Object -First 1
-$bootPath = $paths | Where-Object { $_.Replace('\', '/') -match '(^|/)System/Library/CoreServices/boot\.efi$' } | Select-Object -First 1
+$bootPath = $paths | Where-Object { $_.Replace('\', '/') -match '(^|/)usr/standalone/i386/boot\.efi$' } | Select-Object -First 1
+if (!$bootPath) { $bootPath = $paths | Where-Object { $_.Replace('\', '/') -match '(^|/)System/Library/CoreServices/boot\.efi$' } | Select-Object -First 1 }
 if (!$versionPath -or !$bootPath) { throw 'No installer SystemVersion.plist and boot.efi found; media has not been prepared.' }
 # Extract only the two small inspection files; never expand the installer payload.
 Invoke-ReimsTool $SevenZip @('e', '-y', "-o$inspection", $Iso, $versionPath, $bootPath) | Out-Null
 $script = @'
-import json, pathlib, plistlib, struct, sys
+import json, pathlib, plistlib, struct, sys, zlib
 image, folder = map(pathlib.Path, sys.argv[1:3])
 with image.open('rb') as f:
     header = f.read(1024)
@@ -44,6 +45,43 @@ with image.open('rb') as f:
     iso9660 = f.read(7)[1:6] == b'CD001'
 if header[:2] == b'ER' and header[512:514] == b'PM':
     kind, container = 'disk', 'APM/HFS+'
+elif header[512:520] == b'EFI PART':
+    size = image.stat().st_size
+    if size % 512:
+        raise SystemExit('GPT media size is not sector-aligned.')
+    sector_count = size // 512
+    gpt = header[512:1024]
+    header_size = struct.unpack_from('<I', gpt, 12)[0]
+    header_crc = struct.unpack_from('<I', gpt, 16)[0]
+    current_lba, backup_lba, first_usable, last_usable = struct.unpack_from('<QQQQ', gpt, 24)
+    entries_lba, entry_count, entry_size, entries_crc = struct.unpack_from('<QIII', gpt, 72)
+    table_size = entry_count * entry_size
+    if (header_size < 92 or header_size > 512 or current_lba != 1 or backup_lba >= sector_count or
+        first_usable > last_usable or last_usable >= backup_lba or entry_count < 1 or entry_count > 4096 or
+        entry_size < 128 or entry_size % 8 or table_size > 16 * 1024 * 1024 or entries_lba < 2 or
+        entries_lba * 512 + table_size > size):
+        raise SystemExit('Invalid GPT header or partition table bounds.')
+    checked_header = bytearray(gpt[:header_size])
+    checked_header[16:20] = bytes(4)
+    if zlib.crc32(checked_header) & 0xffffffff != header_crc:
+        raise SystemExit('GPT header checksum is invalid.')
+    with image.open('rb') as f:
+        f.seek(entries_lba * 512)
+        entries = f.read(table_size)
+    if len(entries) != table_size or zlib.crc32(entries) & 0xffffffff != entries_crc:
+        raise SystemExit('GPT partition table checksum is invalid.')
+    apple_hfs = bytes.fromhex('005346480000aa11aa1100306543ecac')
+    has_hfs = False
+    for index in range(entry_count):
+        entry = entries[index * entry_size:(index + 1) * entry_size]
+        if entry[:16] == apple_hfs:
+            first, last = struct.unpack_from('<QQ', entry, 32)
+            if first <= last and first >= first_usable and last <= last_usable:
+                has_hfs = True
+                break
+    if not has_hfs:
+        raise SystemExit('GPT media has no valid Apple HFS+ partition.')
+    kind, container = 'disk', 'GPT/HFS+'
 elif iso9660:
     kind, container = 'cdrom', 'ISO9660'
 else:

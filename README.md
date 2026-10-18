@@ -29,27 +29,31 @@ from Apple and sets the VM up for you, or uses a disk that already has macOS on 
 We've tested arm64 macOS 13, 14, 15 and 26 on an M3 Max, and x86-64 macOS 26 on Linux with an RTX
 5080 laptop GPU. [docs/qemu.md](docs/qemu.md) has the details.
 
-### Windows native development branch
+### Windows native build
 
-The `windows-native-tahoe` branch adds native UCRT64/LLVM builds, WHPX,
-SDL3 Win32/Vulkan windows and PowerShell VM management. See
-[Windows setup](docs/windows-vm.md), [implementation status](docs/IMPLEMENTATION_STATUS.md)
-and [validation limits](docs/KNOWN_ISSUES.md).
+The `windows-native-tahoe` branch adds a native Windows/UCRT64 build, WHPX
+virtual-machine support, Vulkan graphics, and PowerShell tooling. Start with
+the **[Windows build and usage guide](docs/windows-build.md)** for prerequisites,
+build and validation commands, VM setup, script reference, runtime export, and
+troubleshooting. The lower-level [Windows VM notes](docs/windows-vm.md) cover
+media validation and VM behavior; see also [implementation status](docs/IMPLEMENTATION_STATUS.md)
+and [known limitations](docs/KNOWN_ISSUES.md).
 
 ```powershell
-./scripts/windows/bootstrap.ps1
-./scripts/windows/build.ps1
-./scripts/windows/prepare-opencore.ps1
-./scripts/windows/prepare-vm.ps1 -Iso '<your macOS installer>'
-./scripts/windows/doctor.ps1 -RequireWhpx
-./scripts/windows/start.ps1
+.\scripts\windows\bootstrap.ps1
+.\scripts\windows\build.ps1 -Profile release
+.\scripts\windows\verify.ps1
+.\scripts\windows\doctor.ps1
 ```
 
-Windows Hypervisor Platform must be enabled and Windows restarted before
-normal boot. Preparation, native GPU tests and a paused TCG diagnostic have
-passed; installed Tahoe, Liquid Glass and workload FPS are not yet verified.
-Read the Apple license conditions in the setup guide and handle installer
-agreement/account input yourself.
+These commands build and check software; they do not install macOS or prove a
+guest boots on a particular PC. Normal VM starts require Windows Hypervisor
+Platform (WHPX), a compatible Vulkan driver/GPU, and macOS Recovery or installer
+media supplied by the user. The portable Windows runtime ZIP is produced
+separately with `scripts\windows\Export-Runtime.ps1` and
+`scripts\windows\Package-Runtime.ps1`; it does not redistribute Apple Recovery
+media. Download the prepackaged runtime from the
+[GitHub Releases page](https://github.com/aljus7/reims-vgpu/releases).
 ### Install reims-ctl
 
 Clone the repository (without `--recursive`: QEMU's own submodules are not needed) and run:

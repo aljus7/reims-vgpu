@@ -183,7 +183,8 @@ accepts a license, enters credentials, or disables SIP or AMFI.
   `edk2-i386-vars.fd`. Despite the variables file's name, this is the pair
   shipped for QEMU's x86_64 OVMF. The code and variables must come from the
   same package.
-- Your installer image, supplied with `-Iso`; its path is remembered in the
+- Your installer image, supplied with `-Iso`; accepted formats are APM/HFS+,
+  GPT with an Apple HFS+ partition, or ISO9660. Its path is remembered in the
   ignored `vm/state/media.json`. No host-specific ISO path is committed.
 
 All scripts dot-source `scripts/windows/environment.ps1`, which keeps temp,
@@ -215,8 +216,12 @@ It validates the booter's x86_64 PE machine type and records the product
 version/build and original size/mtime. `-HashIso` additionally records the
 whole original's SHA256; subsequent inspections retain it when the path,
 size and mtime agree. Neither the original nor the installer payload is
-rewritten. A file named `.iso` whose header is ER/PM is an APM/HFS+ disk,
-not an ISO9660 CD, and is attached accordingly.
+rewritten. GPT media must have valid GPT checksums and an Apple HFS+ partition.
+A file named `.iso` whose header is ER/PM is an APM/HFS+ disk, not an ISO9660
+CD, and is attached accordingly. Apple's compressed `BaseSystem.dmg` recovery
+image can be converted to a separate sparse raw disk with
+`qemu-img convert -f dmg -O raw -S 4k BaseSystem.dmg Tahoe-Recovery.img`;
+this is network recovery media, not a full offline installer.
 
 OpenCore is pinned to the official [OpenCorePkg 1.0.8 release](https://github.com/acidanthera/OpenCorePkg/releases/tag/1.0.8).
 `-Version` can select another official release with a GitHub SHA256 asset
@@ -240,6 +245,18 @@ and `Kernel/Quirks/ForceSecureBootScheme` to false while QEMU is exited, then
 run preparation with `-Rebuild`. Preserve disk and firmware checkpoints when
 changing personalization. See the
 [OpenCore manual](https://github.com/acidanthera/OpenCorePkg/blob/1.0.8/Docs/Configuration.tex).
+
+For the Tahoe 26.6.2 network-recovery image tested on this Windows host,
+`x86legacy` repeatedly resets while looking for the absent
+`x86legacyap.im4m` manifest. The tested Recovery configuration therefore uses
+`SecureBootModel=Disabled` and a 10-second picker timeout. This is a VM
+recovery workaround, not evidence that Secure Boot is working; reassess the
+setting for an installed guest or a different installer build.
+
+On Windows, the launcher withholds Vulkan device-generated commands because
+device creation fails with the host's AMD Vulkan driver when that optional
+feature is enabled. The feature is not required to boot the guest; graphics
+acceleration remains provided by Reims vGPU.
 
 Native `qemu-img convert -f vvfat` makes a sparse FAT16 image from the EFI
 directory, then its MBR partition type is marked as an EFI System Partition.

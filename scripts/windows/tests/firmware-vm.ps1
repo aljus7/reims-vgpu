@@ -165,7 +165,7 @@ else: raise AssertionError('Unknown mode accepted')
     $fixtureDirectory = Join-Path $testRoot 'media-fixture'
     New-Item -ItemType Directory -Path $fixtureDirectory | Out-Null
     $fixtureSetup = @'
-import pathlib, plistlib, struct, sys
+import pathlib, plistlib, struct, sys, uuid, zlib
 r=pathlib.Path(sys.argv[1])
 image=bytearray(32775)
 image[:2]=b'ER'; image[512:514]=b'PM'
@@ -179,6 +179,31 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
     if ($LASTEXITCODE -ne 0) { throw 'Media fixture setup failed.' }
     $parsed = $mediaParser | & $python - (Join-Path $fixtureDirectory 'media.iso') $fixtureDirectory | ConvertFrom-Json
     Assert-Condition ($LASTEXITCODE -eq 0 -and $parsed.media_kind -eq 'disk' -and $parsed.boot_architecture -eq 'x86_64') 'APM parser identifies x86_64 PE booters'
+    $gptSetup = @'
+import pathlib, struct, sys, uuid, zlib
+r=pathlib.Path(sys.argv[1]); image=bytearray(64*512); entries=bytearray(128*128)
+entry=memoryview(entries)[:128]
+entry[:16]=uuid.UUID('48465300-0000-11aa-aa11-00306543ecac').bytes_le
+entry[16:32]=uuid.UUID('07915d5e-92d7-4bee-8bae-75e7b8fbed5e').bytes_le
+struct.pack_into('<QQQ',entry,32,34,60,0)
+header=bytearray(512); header[:8]=b'EFI PART'
+struct.pack_into('<II',header,8,0x00010000,92)
+struct.pack_into('<QQQQ',header,24,1,63,34,62)
+header[56:72]=uuid.uuid4().bytes_le
+struct.pack_into('<QIII',header,72,2,128,128,zlib.crc32(entries)&0xffffffff)
+struct.pack_into('<I',header,16,zlib.crc32(header[:92])&0xffffffff)
+image[512:1024]=header; image[1024:1024+len(entries)]=entries
+(r/'media-gpt.img').write_bytes(image)
+'@
+    $gptSetup | & $python - $fixtureDirectory
+    if ($LASTEXITCODE -ne 0) { throw 'GPT media fixture setup failed.' }
+    $gptMedia = $mediaParser | & $python - (Join-Path $fixtureDirectory 'media-gpt.img') $fixtureDirectory | ConvertFrom-Json
+    Assert-Condition ($LASTEXITCODE -eq 0 -and $gptMedia.container -eq 'GPT/HFS+' -and $gptMedia.media_kind -eq 'disk') 'GPT parser validates Apple HFS+ recovery disks'
+    $badGpt = [IO.File]::ReadAllBytes((Join-Path $fixtureDirectory 'media-gpt.img'))
+    $badGpt[520] = $badGpt[520] -bxor 1
+    [IO.File]::WriteAllBytes((Join-Path $fixtureDirectory 'media-gpt.img'), $badGpt)
+    $mediaParser | & $python - (Join-Path $fixtureDirectory 'media-gpt.img') $fixtureDirectory 2>$null | Out-Null
+    Assert-Condition ($LASTEXITCODE -ne 0) 'Corrupt GPT headers are refused'
     $badPe = [IO.File]::ReadAllBytes((Join-Path $fixtureDirectory 'boot.efi'))
     $badPe[132] = 0x64; $badPe[133] = 0xaa
     [IO.File]::WriteAllBytes((Join-Path $fixtureDirectory 'boot.efi'), $badPe)
@@ -326,7 +351,7 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
         $media = Get-Content -Raw -LiteralPath (Join-Path $PreparedArtifactsRoot 'vm/state/media.json') | ConvertFrom-Json
         $prepared = Get-Content -Raw -LiteralPath (Join-Path $PreparedArtifactsRoot 'vm/state/config.json') | ConvertFrom-Json
         $opencore = Get-Content -Raw -LiteralPath (Join-Path $PreparedArtifactsRoot 'vm/state/opencore.json') | ConvertFrom-Json
-        Assert-Condition ($media.boot_architecture -eq 'x86_64' -and $media.media_kind -eq 'disk') 'Prepared APM installer contains an x86_64 booter'
+        Assert-Condition ($media.boot_architecture -eq 'x86_64' -and $media.media_kind -eq 'disk' -and $media.container -in @('APM/HFS+', 'GPT/HFS+')) 'Prepared HFS+ recovery disk contains an x86_64 booter'
         Assert-Condition ((Get-FileHash -LiteralPath $opencore.image).Hash -eq $opencore.image_sha256) 'Prepared EFI image hash agrees with manifest'
         Invoke-ReimsTool $opencore.ocvalidate @($opencore.config) | Out-Null
         $sevenZip = Get-ReimsTool '7z.exe'

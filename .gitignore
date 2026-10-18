@@ -4,6 +4,9 @@
 # Windows development caches, private diagnostics and guest state.
 /.work/
 /vm/
+/final/
+/artifacts/*.zip
+/artifacts/*.sha256
 /vendor/metal2vulkan/
 
 # The option ROM's build, when make runs in firmware/ (cargo xtask dist builds
