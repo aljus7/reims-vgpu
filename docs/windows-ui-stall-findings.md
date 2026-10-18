@@ -117,3 +117,5 @@ Traced every register write, the interrupt-register reads and every FIFO command
 - **Host CPU contention does show.** Compiling on the host during a vsynctester run gave 38 of 130 s under 40 fps and a 1.8 s gap, so keeping the host quiet (and QEMU threads at a higher priority) matters.
 
 No fix was found: the wait is inside Apple's closed AppleParavirtGPU/WindowServer on the guest side and the device offers no event it could be waiting on. Untested ideas: raise QEMU and vGPU thread priority on the host, and compare against a real Apple paravirt device's interrupt behaviour.
+
+Tried raising the QEMU process priority to High: 4.4 -> 4.0 avg active fps (4 cycles each, with the register trace still on), so no gain. Not a fix.
