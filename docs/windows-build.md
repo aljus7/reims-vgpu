@@ -223,38 +223,37 @@ missing; setting the key brought them back. Mission Control still ran at
 roughly 14–29 fps afterwards, so this fixes the icon service, not general
 frame rate.
 
-1. Stop the VM, then run `.\scripts\windows\prepare-tools.ps1`. It builds
-   `vm\tools\ReimsTools.img`, now including `recovery-fix.sh`; `start.ps1`
-   attaches it automatically.
-2. Start the VM, choose OpenCore's **Recovery** entry, and open
-   **Utilities → Terminal**.
-3. Run, then reboot into the installed system:
+There are two guest scripts, both copied to the `REIMSTOOLS` disk by
+`.\scripts\windows\prepare-tools.ps1` (run it with the VM stopped; `start.ps1`
+then attaches the disk automatically):
 
-   ```sh
-   sh /Volumes/*/recovery-fix.sh
-   reboot
-   ```
+| When | Script | Where to run it |
+|---|---|---|
+| After macOS is installed, before its first desktop boot | `1-recovery-setup.sh` | OpenCore **Recovery** entry → Utilities → Terminal: `sh /Volumes/REIMSTOOLS/1-recovery-setup.sh`, then `reboot` |
+| Any time on the running desktop | `2-macos-optimize.sh` | macOS Terminal: `sh /Volumes/REIMSTOOLS/2-macos-optimize.sh`, then reboot |
 
-   Equivalent manual commands (the Data volume here was `MACOS - Data`; the
-   quotes matter):
+Script 1 only sets `METAL_ERROR_MODE=5` on the installed Data volume. Script 2
+sets the same key (asks for your password) and trims animations; it also
+repairs a VM that skipped Recovery. Both are safe to rerun. The step-by-step
+guide is [windows-manual.md](windows-manual.md).
 
-   ```sh
-   cd "/Volumes/MACOS - Data/Library/Preferences"
-   defaults write "$PWD/.GlobalPreferences" METAL_ERROR_MODE -int 5
-   chmod 644 .GlobalPreferences.plist
-   ```
+Equivalent manual commands for Recovery (the Data volume here was
+`MACOS - Data`; the quotes matter):
 
-   The `chmod 644` is required: `defaults` leaves mode 0600, which user
-   processes cannot read. Do not write to `/Volumes/* - Data/...` directly,
-   because the glob is not expanded and creates a path in Recovery's RAM disk.
-4. On an already running desktop, `guest-setup.command` on the same tools
-   volume (or `sudo defaults write /Library/Preferences/.GlobalPreferences
-   METAL_ERROR_MODE -int 5`, then a restart) applies it too.
+```sh
+cd "/Volumes/MACOS - Data/Library/Preferences"
+defaults write "$PWD/.GlobalPreferences" METAL_ERROR_MODE -int 5
+chmod 644 .GlobalPreferences.plist
+```
+
+The `chmod 644` is required: `defaults` leaves mode 0600, which user
+processes cannot read. Do not write to `/Volumes/* - Data/...` directly,
+because the glob is not expanded and creates a path in Recovery's RAM disk.
 
 This cannot be fully automatic during installation: the installed Data
 volume does not exist until the installer finishes, and the guest must boot
-into Recovery to write to it before the first desktop session. Undo with
-`sudo defaults delete /Library/Preferences/.GlobalPreferences
+into Recovery to write to it before the first desktop session.
+Undo with `sudo defaults delete /Library/Preferences/.GlobalPreferences
 METAL_ERROR_MODE`. Background and measurements: `docs/qemu.md`, “x86-64
 macOS guests: Metal’s error mode”.
 

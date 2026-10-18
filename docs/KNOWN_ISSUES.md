@@ -20,6 +20,12 @@ as a candidate rather than a qualified family-wide release.
 
 ## Display width and stalls
 
+Frame rate is limited: Mission Control and Liquid Glass effects run at roughly
+6–20 fps, and vsync dips and multi-second freezes occur; no fix is known.
+Reducing transparency and motion helps ([manual](windows-manual.md), section
+6). OpenGL apps use a guest software renderer. See
+[windows-ui-stall-findings.md](windows-ui-stall-findings.md).
+
 Upstream documents an x86 Tahoe WindowServer/plugin tile-texture failure
 above 2048 pixels wide. Initial qualification uses 1920x1080. Higher display
 choices remain available with a warning; availability is not proof of stable

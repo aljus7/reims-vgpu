@@ -28,7 +28,7 @@ Windows deallocate now unmaps every view of a contiguous run, coalesces the plac
 - Dock/NSGlobalDomain animation defaults (expose duration, launchanim, reduce motion) changed Mission Control from avg 9.3 to 9.7 active fps: negligible. The limit is host-side, not guest animation. com.apple.universalaccess cannot be written without TCC.
 - A login after killing QEMU shows 'You shut down because of a problem' and then ~100 s of near-zero frames; it recovers. Shut the guest down over SSH (sudo shutdown -h now) instead of killing QEMU.
 - One earlier permanent freeze at the login screen was not reproduced.
-- scripts/windows/guest-perf-tweaks.sh sets METAL_ERROR_MODE=5 (Recovery or running macOS) plus the optional animation tweaks.
+- scripts/windows/guest-1-recovery-setup.sh (Recovery) and guest-2-macos-optimize.sh (running macOS) set METAL_ERROR_MODE=5; the second also applies the optional animation tweaks.
 
 
 ## Where the time goes (measured)

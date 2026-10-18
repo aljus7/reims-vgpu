@@ -29,31 +29,46 @@ from Apple and sets the VM up for you, or uses a disk that already has macOS on 
 We've tested arm64 macOS 13, 14, 15 and 26 on an M3 Max, and x86-64 macOS 26 on Linux with an RTX
 5080 laptop GPU. [docs/qemu.md](docs/qemu.md) has the details.
 
-### Windows native build
+### Windows (native, WHPX + Vulkan)
 
-The `windows-native-tahoe` branch adds a native Windows/UCRT64 build, WHPX
-virtual-machine support, Vulkan graphics, and PowerShell tooling. Start with
-the **[Windows build and usage guide](docs/windows-build.md)** for prerequisites,
-build and validation commands, VM setup, script reference, runtime export, and
-troubleshooting. The lower-level [Windows VM notes](docs/windows-vm.md) cover
-media validation and VM behavior; see also [implementation status](docs/IMPLEMENTATION_STATUS.md)
-and [known limitations](docs/KNOWN_ISSUES.md).
+The `windows-native-tahoe` branch runs an x86-64 macOS Tahoe VM natively on
+Windows 11: QEMU with WHPX, the Reims Vulkan vGPU, and PowerShell tooling.
+Beta, tested on one PC; whether it boots on yours must be tested on your
+hardware.
+
+Read the **[Windows user manual](docs/windows-manual.md)** for the whole path
+from build to a working desktop. In short:
 
 ```powershell
-.\scripts\windows\bootstrap.ps1
-.\scripts\windows\build.ps1 -Profile release
-.\scripts\windows\verify.ps1
-.\scripts\windows\doctor.ps1
+.\scripts\windows\bootstrap.ps1                 # once
+.\scripts\windows\build.ps1                     # release build, no debug info
+.\scripts\windows\doctor.ps1 -RequireWhpx
+.\scripts\windows\prepare-opencore.ps1
+.\scripts\windows\prepare-vm.ps1 -Iso 'C:\path\Recovery.img'
+.\scripts\windows\start.ps1                     # install macOS
 ```
 
-These commands build and check software; they do not install macOS or prove a
-guest boots on a particular PC. Normal VM starts require Windows Hypervisor
-Platform (WHPX), a compatible Vulkan driver/GPU, and macOS Recovery or installer
-media supplied by the user. The portable Windows runtime ZIP is produced
-separately with `scripts\windows\Export-Runtime.ps1` and
-`scripts\windows\Package-Runtime.ps1`; it does not redistribute Apple Recovery
-media. Download the prepackaged runtime from the
-[GitHub Releases page](https://github.com/aljus7/reims-vgpu/releases).
+**Required guest fix.** Without `METAL_ERROR_MODE=5` a fresh install has no
+Dock and blank icons. Two scripts handle it; `prepare-tools.ps1` puts them on a
+`REIMSTOOLS` disk the VM attaches:
+
+| Script | Run it | Purpose |
+|---|---|---|
+| `1-recovery-setup.sh` | once, from macOS **Recovery** Terminal, after installing and before the first desktop boot | sets `METAL_ERROR_MODE=5` on the installed volume |
+| `2-macos-optimize.sh` | from macOS Terminal, any time | sets the same key and trims animations |
+
+**Make it faster.** Turn on *Reduce Transparency* and *Reduce Motion* in System
+Settings → Accessibility → Display, disable the Dock's opening animation, and use
+a static wallpaper. Liquid Glass blur and Mission Control are drawn partly in
+software in the guest and are the main cause of low frame rates. Details:
+[manual, section 6](docs/windows-manual.md#6-make-it-faster-reduce-animations-blur-and-liquid-glass).
+
+More: [build and script reference](docs/windows-build.md),
+[VM preparation](docs/windows-vm.md), [known limitations](docs/KNOWN_ISSUES.md),
+[implementation status](docs/IMPLEMENTATION_STATUS.md), and measured stalls in
+[windows-ui-stall-findings.md](docs/windows-ui-stall-findings.md). A prebuilt
+runtime is on the [Releases page](https://github.com/aljus7/reims-vgpu/releases);
+it does not include Apple Recovery media.
 ### Install reims-ctl
 
 Clone the repository (without `--recursive`: QEMU's own submodules are not needed) and run:

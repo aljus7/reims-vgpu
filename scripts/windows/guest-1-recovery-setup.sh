@@ -1,8 +1,12 @@
 #!/bin/sh
-# Run from macOS Recovery (Utilities > Terminal) before the first desktop boot:
-#   sh /Volumes/*/recovery-fix.sh
-# Sets Metal's error mode on the installed system's Data volume. Without it,
-# iconservicesagent ends repeatedly and the Dock and icons stay blank.
+# STEP 1 - run once from macOS Recovery, after macOS is installed and before
+# its first desktop boot:
+#   Recovery > Utilities > Terminal:   sh /Volumes/REIMSTOOLS/1-recovery-setup.sh
+# (the tools disk is the volume that contains this file; `sh /Volumes/*/1-recovery-setup.sh` also works)
+#
+# Sets METAL_ERROR_MODE=5 on the installed system's Data volume. Without it
+# iconservicesagent keeps ending and the desktop has no Dock and blank icons.
+# Safe to rerun.
 set -eu
 
 found=0
@@ -15,7 +19,6 @@ for data in /Volumes/*Data; do
     chmod 644 "$prefs/.GlobalPreferences.plist"
     printf 'METAL_ERROR_MODE = '
     defaults read "$prefs/.GlobalPreferences" METAL_ERROR_MODE
-    ls -l "$prefs/.GlobalPreferences.plist"
 done
 
 if [ "$found" -eq 0 ]; then
