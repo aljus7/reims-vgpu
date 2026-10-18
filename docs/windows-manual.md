@@ -166,6 +166,9 @@ Git repository. Do not move or copy a VM while QEMU is running.
 - **"You shut down because of a problem" after killing QEMU:** the guest was
   stopped abruptly. Let it restart; it recovers by itself. Shut down from the
   guest or with `stop.ps1` next time.
+- **Diagnostics:** the vGPU log level and the per-second stats are off by
+  default. To enable them for one run, set `REIMS_DEBUG=1` before starting
+  (`$env:REIMS_DEBUG = '1'`); output goes to `vm\logs\<run>\stderr.log`.
 - **WHPX or Vulkan errors:** see [windows-build.md](windows-build.md),
   "Troubleshooting and limitations".
 - **Stutter now and then (vsync dips, 250 ms to multi-second freezes):** a known
