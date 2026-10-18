@@ -488,6 +488,10 @@ impl HostVm for WindowsVm {
             return Err(INVALID_ADDRESS);
         }
         for (&base, view) in views.range_mut(first..end) {
+            // A view is already mapped with its own protection: nothing to lower.
+            if view.prot == prot.raw() {
+                continue;
+            }
             let mut old = 0;
             // SAFETY: each view is owned and no access is made; only lowers its maximum.
             if unsafe {
