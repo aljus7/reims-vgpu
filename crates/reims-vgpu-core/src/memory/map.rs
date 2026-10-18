@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use crate::guest::records::APV_PAGE_SIZE;
 use crate::host::{HostPtr, PhysRange};
-use crate::memory::DeathKind;
 use crate::memory::descriptor::MemoryMapDescriptor;
 use crate::memory::mapping::{Mapping, Teardown};
+use crate::memory::DeathKind;
 use crate::num::{ToU64, ToUsize};
-use crate::platform::Platform;
 use crate::platform::os::vm::VmProt;
+use crate::platform::Platform;
 
 /// One range of the map: `{start, start + length, length, host pointer}`. The field names are
 /// ours.
@@ -56,6 +56,7 @@ fn ptr_u64(x: u64) -> HostPtr {
 impl<P: Platform> MemoryMap<P> {
     /// `mach_vm_remap`s `piece_length` bytes of `map_range`'s host memory at `piece_address` to
     /// `target` (shared, overwrite); only `KERN_SUCCESS` is tested.
+    #[cfg(test)]
     fn map_physical_range(
         &self,
         map_range: &MemoryMapRange,
@@ -63,14 +64,26 @@ impl<P: Platform> MemoryMap<P> {
         piece_length: u64,
         target: u64,
     ) -> bool {
+        let (target, source, length) =
+            Self::remap_piece(map_range, piece_address, piece_length, target);
+        self.platform
+            .vm()
+            .remap_shared_overwrite(target, source, length)
+            .is_ok()
+    }
+
+    /// The `(target, source, length)` of one such remap.
+    fn remap_piece(
+        map_range: &MemoryMapRange,
+        piece_address: u64,
+        piece_length: u64,
+        target: u64,
+    ) -> (HostPtr, HostPtr, u64) {
         // u64 arithmetic, wrapping.
         let source = addr_u64(map_range.virtual_address)
             .wrapping_add(piece_address)
             .wrapping_sub(map_range.physical_address);
-        self.platform
-            .vm()
-            .remap_shared_overwrite(ptr_u64(target), ptr_u64(source), piece_length)
-            .is_ok()
+        (ptr_u64(target), ptr_u64(source), piece_length)
     }
 
     /// The host's map: the checked adds, the sort, the validation and its logs. `None` refuses
@@ -157,11 +170,16 @@ impl<P: Platform> MemoryMap<P> {
         let p = &*self.platform;
         let mut mapped: u64 = 0;
         let mut target = addr_u64(address);
-        for request in ranges {
+        let mut pieces: Vec<(HostPtr, HostPtr, u64)> = Vec::with_capacity(ranges.len());
+        let mut ok = true;
+        'requests: for request in ranges {
             let mut range = *request;
             // Guest physical 0 is refused, even with length 0.
             if range.physical_address == 0 {
-                return false;
+                {
+                    ok = false;
+                    break 'requests;
+                }
             }
             let Some(m) = mapped.checked_add(range.physical_length) else {
                 log::warn!(
@@ -170,7 +188,10 @@ impl<P: Platform> MemoryMap<P> {
                     range.physical_address,
                     range.physical_length
                 );
-                return false;
+                {
+                    ok = false;
+                    break 'requests;
+                }
             };
             mapped = m;
             if range.physical_length == 0 {
@@ -182,7 +203,10 @@ impl<P: Platform> MemoryMap<P> {
                     range.physical_address,
                     range.physical_length
                 );
-                return false;
+                {
+                    ok = false;
+                    break 'requests;
+                }
             };
             for map_range in &self.ranges {
                 if range.physical_address < map_range.physical_address
@@ -191,31 +215,23 @@ impl<P: Platform> MemoryMap<P> {
                     continue;
                 }
                 if map_range.physical_end >= end {
-                    if !self.map_physical_range(
+                    pieces.push(Self::remap_piece(
                         map_range,
                         range.physical_address,
                         range.physical_length,
                         target,
-                    ) {
-                        log::error!(
-                            "mapping failed: {:#x} bytes of guest memory at {:#x} not remapped",
-                            range.physical_length,
-                            range.physical_address
-                        );
-                        return false;
-                    }
+                    ));
                     target = target.wrapping_add(range.physical_length);
                     range.physical_length = 0;
                     break;
                 }
                 let length = map_range.physical_end.wrapping_sub(range.physical_address);
-                if !self.map_physical_range(map_range, range.physical_address, length, target) {
-                    log::error!(
-                        "mapping failed: {length:#x} bytes of guest memory at {:#x} not remapped",
-                        range.physical_address
-                    );
-                    return false;
-                }
+                pieces.push(Self::remap_piece(
+                    map_range,
+                    range.physical_address,
+                    length,
+                    target,
+                ));
                 target = target.wrapping_add(length);
                 range.physical_length = range.physical_length.wrapping_sub(length);
                 range.physical_address = map_range.physical_end;
@@ -226,8 +242,19 @@ impl<P: Platform> MemoryMap<P> {
                     range.physical_length,
                     range.physical_address
                 );
-                return false;
+                {
+                    ok = false;
+                    break 'requests;
+                }
             }
+        }
+        // Pieces before a refusal stay, as one at a time would leave them.
+        if p.vm().remap_shared_overwrite_many(&pieces).is_err() {
+            log::error!("mapping failed: {mapped:#x} bytes of guest memory not remapped");
+            return false;
+        }
+        if !ok {
+            return false;
         }
 
         let prot = if read_only {
@@ -276,11 +303,15 @@ impl<P: Platform> MemoryMap<P> {
             total_length % const { NonZeroU64::new(APV_PAGE_SIZE).unwrap() } == 0,
             DeathKind::MappingLengthUnaligned
         );
+        // The remaps, issued together after the checks so the host can batch them.
+        let mut pieces: Vec<(HostPtr, HostPtr, u64)> = Vec::with_capacity(ranges.len());
         let Ok(address) = vm.allocate_anywhere(total_length) else {
             return None;
         };
         // The whole allocation freed, the result ignored.
-        let free_all = || {
+        let free_all = |pieces: &[(HostPtr, HostPtr, u64)]| {
+            // Pieces gathered before a refusal are remapped first, as one at a time would be.
+            let _ = vm.remap_shared_overwrite_many(pieces);
             let _ = vm.deallocate(address, total_length);
         };
 
@@ -290,16 +321,16 @@ impl<P: Platform> MemoryMap<P> {
             let mut range = *request;
             // Guest physical 0 is refused, even with length 0.
             if range.physical_address == 0 {
-                free_all();
+                free_all(&pieces);
                 return None;
             }
             let Some(m) = mapped.checked_add(range.physical_length) else {
-                free_all();
+                free_all(&pieces);
                 return None;
             };
             mapped = m;
             if mapped > total_length {
-                free_all();
+                free_all(&pieces);
                 return None;
             }
             if range.physical_length == 0 {
@@ -307,7 +338,7 @@ impl<P: Platform> MemoryMap<P> {
             }
             // `end` stays the request's original end
             let Some(end) = range.physical_address.checked_add(range.physical_length) else {
-                free_all();
+                free_all(&pieces);
                 return None;
             };
             // Pieces split across contiguous map ranges, in stored order.
@@ -319,36 +350,39 @@ impl<P: Platform> MemoryMap<P> {
                 }
                 let length = map_range.physical_end.wrapping_sub(range.physical_address);
                 if map_range.physical_end < end {
-                    if !self.map_physical_range(map_range, range.physical_address, length, target) {
-                        free_all();
-                        return None;
-                    }
+                    pieces.push(Self::remap_piece(
+                        map_range,
+                        range.physical_address,
+                        length,
+                        target,
+                    ));
                     target = target.wrapping_add(length);
                     range.physical_length = range.physical_length.wrapping_sub(length);
                     range.physical_address = map_range.physical_end;
                     continue;
                 }
-                if !self.map_physical_range(
+                pieces.push(Self::remap_piece(
                     map_range,
                     range.physical_address,
                     range.physical_length,
                     target,
-                ) {
-                    free_all();
-                    return None;
-                }
+                ));
                 target = target.wrapping_add(range.physical_length);
                 range.physical_length = 0;
                 break;
             }
             if range.physical_length != 0 {
-                free_all();
+                free_all(&pieces);
                 return None;
             }
         }
 
         if mapped != total_length {
-            free_all();
+            free_all(&pieces);
+            return None;
+        }
+        if vm.remap_shared_overwrite_many(&pieces).is_err() {
+            let _ = vm.deallocate(address, total_length);
             return None;
         }
         let prot = if read_only != 0 {
@@ -358,7 +392,7 @@ impl<P: Platform> MemoryMap<P> {
         };
         if vm.protect_max(address, total_length, prot).is_err() {
             // Deallocated, then the mapping is made anyway.
-            free_all();
+            let _ = vm.deallocate(address, total_length);
         }
         // Writable unless read-only; making the mapping never fails.
         Some(Mapping::new(
@@ -1064,10 +1098,9 @@ mod tests {
         fn a_remainder_with_no_next_range_is_refused_after_the_first_piece() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x4000), (0xc000, 0x4000)]);
-            assert!(
-                m.new_range_mapping(&[pr(0x4000, 0x8000)], 0x8000, 0)
-                    .is_none()
-            );
+            assert!(m
+                .new_range_mapping(&[pr(0x4000, 0x8000)], 0x8000, 0)
+                .is_none());
             assert_eq!(
                 sels(&p),
                 vec!["mach_vm_allocate", "mach_vm_remap", "mach_vm_deallocate"]
@@ -1101,10 +1134,9 @@ mod tests {
         fn more_than_the_total_is_refused_before_mapping() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x8000)]);
-            assert!(
-                m.new_range_mapping(&[pr(0x4000, PAGE), pr(0x8000, PAGE)], PAGE, 0)
-                    .is_none()
-            );
+            assert!(m
+                .new_range_mapping(&[pr(0x4000, PAGE), pr(0x8000, PAGE)], PAGE, 0)
+                .is_none());
             assert_eq!(
                 sels(&p),
                 vec!["mach_vm_allocate", "mach_vm_remap", "mach_vm_deallocate"]
@@ -1115,10 +1147,9 @@ mod tests {
         fn less_than_the_total_is_refused_after_mapping() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x8000)]);
-            assert!(
-                m.new_range_mapping(&[pr(0x4000, PAGE)], 2 * PAGE, 0)
-                    .is_none()
-            );
+            assert!(m
+                .new_range_mapping(&[pr(0x4000, PAGE)], 2 * PAGE, 0)
+                .is_none());
             assert_eq!(
                 sels(&p),
                 vec!["mach_vm_allocate", "mach_vm_remap", "mach_vm_deallocate"]
@@ -1130,10 +1161,9 @@ mod tests {
         fn an_end_overflow_is_refused() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x8000)]);
-            assert!(
-                m.new_range_mapping(&[pr(u64::MAX - 0xfff, PAGE)], PAGE, 0)
-                    .is_none()
-            );
+            assert!(m
+                .new_range_mapping(&[pr(u64::MAX - 0xfff, PAGE)], PAGE, 0)
+                .is_none());
             assert_eq!(sels(&p), vec!["mach_vm_allocate", "mach_vm_deallocate"]);
         }
 
@@ -1141,10 +1171,9 @@ mod tests {
         fn outside_every_range_is_refused() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x8000)]);
-            assert!(
-                m.new_range_mapping(&[pr(0x10_0000, PAGE)], PAGE, 0)
-                    .is_none()
-            );
+            assert!(m
+                .new_range_mapping(&[pr(0x10_0000, PAGE)], PAGE, 0)
+                .is_none());
             assert_eq!(sels(&p), vec!["mach_vm_allocate", "mach_vm_deallocate"]);
         }
 
@@ -1368,12 +1397,15 @@ mod tests {
             p.script().push("mach_vm_remap", Step::value(KernReturn(1)));
             let logs = crate::testkit::logs::capture();
             assert!(!m.map_memory_at_virtual_address(dst, &[pr(0x4000, 2 * PAGE)], false));
-            assert_eq!(memory_lines(&logs), vec![NOT_REMAPPED.to_owned()]);
+            assert_eq!(
+                memory_lines(&logs),
+                vec!["mapping failed: 0x8000 bytes of guest memory not remapped".to_owned()]
+            );
         }
 
-        /// The error for the first page of guest memory at 0x4000, not remapped.
-        const NOT_REMAPPED: &str =
-            "mapping failed: 0x4000 bytes of guest memory at 0x4000 not remapped";
+        /// The error for the one-page request, not remapped. The remaps go out as one batch, so
+        /// the message names the request's total length, not the failing piece.
+        const NOT_REMAPPED: &str = "mapping failed: 0x4000 bytes of guest memory not remapped";
 
         #[test]
         fn an_incomplete_range_logs_and_keeps_its_pieces() {

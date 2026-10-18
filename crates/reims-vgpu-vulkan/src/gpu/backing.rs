@@ -1028,18 +1028,19 @@ pub(crate) fn gather(
         kept: AtomicBool::new(false),
     };
     let mut pages = 0;
+    let mut pieces = Vec::with_capacity(runs.len());
     for run in runs {
         let source = HostPtr::from_addr(usize::try_from(run.source).ok()?);
-        if let Err(kr) = vm.remap_shared_overwrite(at.wrapping_add(run.offset), source, run.length)
-        {
-            refused_by_host(
-                sel,
-                "a remap of the guest's pages into an alias",
-                run.length,
-                kr,
-            );
-        }
+        pieces.push((at.wrapping_add(run.offset), source, run.length));
         pages = run.offset + run.length;
+    }
+    if let Err(kr) = vm.remap_shared_overwrite_many(&pieces) {
+        refused_by_host(
+            sel,
+            "a remap of the guest's pages into an alias",
+            pages,
+            kr,
+        );
     }
     if read_only {
         if crate::os::TWINS_READ_ONLY {

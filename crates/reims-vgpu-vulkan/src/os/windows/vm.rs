@@ -468,6 +468,42 @@ impl HostVm for WindowsVm {
         map_parts(first, length, &parts)?;
         Ok(destination)
     }
+    fn remap_shared_overwrite_many(
+        &self,
+        items: &[(HostAddr, HostAddr, u64)],
+    ) -> Result<(), KernReturn> {
+        // Contiguous, ascending, page-aligned pieces replace their destination in one pass
+        // over the placeholder; anything else goes one remap at a time.
+        let page = page_size();
+        let mut next = items.first().map(|item| item.0.addr().to_u64());
+        let batchable = items.len() > 1
+            && items.iter().all(|&(dst, src, len)| {
+                let ok = next == Some(dst.addr().to_u64())
+                    && len != 0
+                    && len % page == 0
+                    && dst.addr().to_u64() % page == 0
+                    && src.addr().to_u64() % page == 0;
+                next = dst.addr().to_u64().checked_add(len);
+                ok
+            });
+        if !batchable {
+            for &(dst, src, len) in items {
+                self.remap_shared_overwrite(dst, src, len)?;
+            }
+            return Ok(());
+        }
+        let first = items[0].0.addr().to_u64();
+        let mut parts: Vec<Piece> = Vec::with_capacity(items.len());
+        let mut at = 0u64;
+        for &(_, src, len) in items {
+            for mut piece in files::pieces(src.addr().to_u64(), len).ok_or(INVALID_ADDRESS)? {
+                piece.at += at;
+                parts.push(piece);
+            }
+            at += len;
+        }
+        map_parts(first, at, &parts)
+    }
     fn protect_max(&self, address: HostAddr, length: u64, prot: VmProt) -> Result<(), KernReturn> {
         let (first, length) = pages(address, length).ok_or(INVALID_ARGUMENT)?;
         if length == 0 {
@@ -596,5 +632,32 @@ pub(crate) mod tests {
             assert_eq!(at.as_ptr::<u8>().add(PAGE.to_usize()).read(), 0);
         }
         assert!(vm.deallocate(at, 3 * PAGE).is_success());
+    }
+    #[test]
+    fn batched_remap_matches_single_remaps() {
+        let vm = WindowsVm;
+        let p = PAGE.to_usize();
+        let source = vm.allocate_anywhere(4 * PAGE).unwrap();
+        let target = vm.allocate_anywhere(4 * PAGE).unwrap();
+        for i in 0..4 {
+            // SAFETY: live writable allocation.
+            unsafe { source.as_ptr::<u8>().add(i * p).write(i as u8 + 1) };
+        }
+        let at = |base: HostAddr, page: usize| HostAddr::from_addr(base.addr() + page * p);
+        // Reversed page order, so every piece is a separate view.
+        let pieces: Vec<_> = (0..4)
+            .map(|i| (at(target, i), at(source, 3 - i), PAGE))
+            .collect();
+        vm.remap_shared_overwrite_many(&pieces).unwrap();
+        for i in 0..4 {
+            // SAFETY: each target page aliases a source page.
+            unsafe {
+                assert_eq!(at(target, i).as_ptr::<u8>().read(), (4 - i) as u8);
+                at(target, i).as_ptr::<u8>().write(9);
+                assert_eq!(at(source, 3 - i).as_ptr::<u8>().read(), 9);
+            }
+        }
+        assert!(vm.deallocate(target, 4 * PAGE).is_success());
+        assert!(vm.deallocate(source, 4 * PAGE).is_success());
     }
 }

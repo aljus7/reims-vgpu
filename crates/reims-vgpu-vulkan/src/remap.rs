@@ -371,20 +371,23 @@ impl HostVm for VulkanVm {
         len: u64,
     ) -> Result<HostAddr, KernReturn> {
         let at = self.vm.remap_shared_overwrite(dst, src, len)?;
-        // The kernel maps the source's pages, from the page of its first byte: as many bytes
-        // past `dst` as the source's offset in its page, and `len` more.
-        let mask = self.vm.page_size().wrapping_sub(1);
-        let offset = src.addr().to_u64() & mask;
-        let replaced = self.changed(dst, len.saturating_add(offset));
-        HOLDS.lock().replaced(&replaced);
-        // Those pages are one of core's mappings of the guest's (module docs).
-        let (first, length) = pages(dst, len.saturating_add(offset), self.vm.page_size());
-        let first = first.addr().to_u64();
-        let source = src.addr().to_u64() & !mask;
-        GUEST_MAPPINGS
-            .lock()
-            .mapped(first, first.saturating_add(length), source);
+        self.remapped(dst, src, len);
         Ok(at)
+    }
+
+    fn remap_shared_overwrite_many(
+        &self,
+        pieces: &[(HostAddr, HostAddr, u64)],
+    ) -> Result<(), KernReturn> {
+        let result = self.vm.remap_shared_overwrite_many(pieces);
+        // Every piece before a failure is bookkept like a single remap; a failed batch is
+        // freed whole by the caller.
+        if result.is_ok() {
+            for &(dst, src, len) in pieces {
+                self.remapped(dst, src, len);
+            }
+        }
+        result
     }
 
     fn protect_max(&self, addr: HostAddr, len: u64, prot: VmProt) -> Result<(), KernReturn> {
@@ -399,6 +402,24 @@ impl HostVm for VulkanVm {
             return KernReturn::SUCCESS;
         }
         self.vm.deallocate(addr, len)
+    }
+}
+
+impl VulkanVm {
+    fn remapped(&self, dst: HostAddr, src: HostAddr, len: u64) {
+        // The kernel maps the source's pages, from the page of its first byte: as many bytes
+        // past `dst` as the source's offset in its page, and `len` more.
+        let mask = self.vm.page_size().wrapping_sub(1);
+        let offset = src.addr().to_u64() & mask;
+        let replaced = self.changed(dst, len.saturating_add(offset));
+        HOLDS.lock().replaced(&replaced);
+        // Those pages are one of core's mappings of the guest's (module docs).
+        let (first, length) = pages(dst, len.saturating_add(offset), self.vm.page_size());
+        let first = first.addr().to_u64();
+        let source = src.addr().to_u64() & !mask;
+        GUEST_MAPPINGS
+            .lock()
+            .mapped(first, first.saturating_add(length), source);
     }
 }
 

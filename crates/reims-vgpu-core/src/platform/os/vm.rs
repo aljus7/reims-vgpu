@@ -76,6 +76,17 @@ pub trait HostVm: Send + Sync {
         src: HostAddr,
         len: u64,
     ) -> Result<HostAddr, KernReturn>;
+    /// `remap_shared_overwrite` of each `(dst, src, len)` in order, stopping at the first
+    /// failure. A host may batch pieces whose destinations are contiguous and ascending.
+    fn remap_shared_overwrite_many(
+        &self,
+        pieces: &[(HostAddr, HostAddr, u64)],
+    ) -> Result<(), KernReturn> {
+        for &(dst, src, len) in pieces {
+            self.remap_shared_overwrite(dst, src, len)?;
+        }
+        Ok(())
+    }
     /// `mach_vm_protect(task, addr, len, TRUE, prot)`: sets the **maximum** protection
     /// (`set_maximum = TRUE`), not mprotect semantics. A later write to a read-only range is a
     /// SIGBUS, a process death.
