@@ -10,3 +10,11 @@ Measured with temporary timers on the Windows host:
 - A real fix must avoid mapping scattered pages as views (e.g. per-page copy into a contiguous
   host buffer with explicit sync, or lazy transfer buffers). Not implemented.
 - The guest only exposes 60 Hz modes, so 120 fps is not reachable.
+
+## Batched remaps (perf/page-copy)
+
+Guest pages are fully fragmented, so each 4 KB page was its own remap and each went through replace() (about 6 syscalls). HostVm::remap_shared_overwrite_many lets Windows map a contiguous run of pieces in one placeholder pass (about 2 syscalls per page). A 2040-run mapping dropped from about 29 ms to about 11 ms.
+
+Remaining costs: deallocate per view, ReplacePhysical, per-piece files::record, and the throwaway section in allocate_anywhere.
+
+Five gpu::backing tests in reims-vgpu-vulkan fail on baseline as well.
