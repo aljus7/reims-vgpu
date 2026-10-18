@@ -94,3 +94,7 @@ With three vsynctester tabs, the first scripted click on Control Center/Wi-Fi co
 ### Reproduced: single vsynctester + Control Center
 
 With one vsynctester tab loaded: a steady 55-60 frames/s (gap ~19 ms). Opening Control Center and the Wi-Fi view drops it to 18-27 frames/s (gaps 45-115 ms) for as long as the popover is up, and it returns to 54-60/s when closed. No multi-second stall, and GPU time stays ~2 ms, so the cost is the extra compositing of the blurred/translucent popover (CPU-side in QuartzCore), not the vGPU. Reduce Transparency is the likely mitigation and still needs a manual toggle.
+
+### Correction: the Control Center repro was a cold app launch
+
+A WindowServer sample with the popover open is ~100% idle, so compositing the popover is not the bottleneck. `top` during a scripted click showed Tips launching (65% CPU) and `iconservicesagent` at 42%, i.e. my approximate click coordinates launched a cold app, and the 18-27 fps dip is the same first-launch icon/asset CPU work seen elsewhere, competing with Safari's WebKit processes for the 8 vCPUs. The earlier 'blurred popover' explanation is withdrawn; the user's real Control Center click still needs a manual repro.
