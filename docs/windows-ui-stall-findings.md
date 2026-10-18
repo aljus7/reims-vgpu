@@ -82,3 +82,7 @@ Steady state: 45-59 frames/s (max gap 20-60 ms, GPU 2-3.4 ms/frame), so the vGPU
 ### Shader compilation vs. icon cache (Freeform cold launch)
 
 Guest exposes AVX2 and 8 vCPUs. During a cold Freeform launch, `MTLCompilerService` stayed ~0% CPU; the CPU went to the app itself (~98% briefly) and `iconservicesagent` (37-78% for ~10 s). So guest shader compilation is not the culprit; first-run icon rendering/caching is. This matches System Settings icons loading slowly once and then fast.
+
+### Why iconservicesagent is slow
+
+Sampled the user `iconservicesagent` while 5 apps launched cold. The busy threads are in `ISGenerationRequest generateImageReturningRecordIdentifiers` -> `ISIconStackAssetCatalogResource layerDataForSize` -> IconRendering, which renders the layered Tahoe icons in software: `CGImageIsInside_sRGB` colour-gamut scans of FP16 images, vImage conversions, `RGBAf16_mark_inner` blits and `lzfse` compression of the cached result. Everything is CPU image work in the guest; no GPU, disk or vGPU wait. It runs once per icon and size, then the cache is hit, which is why System Settings was slow only the first time.
