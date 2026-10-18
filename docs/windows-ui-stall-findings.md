@@ -78,3 +78,7 @@ Chess launch: 0-18 frames/s with 1-6 s gaps, GPU 1.1-3.5 ms per frame. A 10 s sa
 ### vsynctester.com in Safari
 
 Steady state: 45-59 frames/s (max gap 20-60 ms, GPU 2-3.4 ms/frame), so the vGPU path sustains near-60 fps for a single animating surface. Frame rate collapses to 2-21/s with 0.5-1.5 s gaps only when the window set changes (maximise, app launch), as in the other cold-start cases. The Safari GPU-process sample shows CPU rasterisation in QuartzCore (`CA::OGL::Shape::FillRenderer::render_lines`, `CA::ScanConverter`): shape fills run through Core Animation's software scan converter on the guest CPU.
+
+### Shader compilation vs. icon cache (Freeform cold launch)
+
+Guest exposes AVX2 and 8 vCPUs. During a cold Freeform launch, `MTLCompilerService` stayed ~0% CPU; the CPU went to the app itself (~98% briefly) and `iconservicesagent` (37-78% for ~10 s). So guest shader compilation is not the culprit; first-run icon rendering/caching is. This matches System Settings icons loading slowly once and then fast.
