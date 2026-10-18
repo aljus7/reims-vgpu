@@ -106,3 +106,14 @@ Over two 90-110 s runs with a single vsynctester tab and nothing else touched: 6
 ### vCPU speed and guest timer stalls
 
 Same perl loop (30M iterations): guest 2.17 s vs host 1.73 s, so a vCPU runs at ~80% of native speed (WHPX overhead is small for pure compute). A 20 s guest timer test (7595 x 2 ms sleeps, vsynctester running): median overshoot 0.54 ms, p99 1.3 ms, max 12 ms, none over 50 ms. So the guest scheduler/vCPUs do not stall; the 0.25-5 s stalls seen in rendering are not CPU starvation or vCPU descheduling. They happen on the app/WindowServer<->GPU-driver wait path (or in cold-start single-thread work).
+
+### Register/command trace of the stalls (REIMS_REGTRACE, instrumentation reverted)
+
+Traced every register write, the interrupt-register reads and every FIFO command (with the time of commands over 3 ms) for 364 s of Mission Control and desktop animation. Opcodes below are hex (0x37 = ExecIndirect2, 0x25 = DeleteResource, 0x22 = UnmapMemory).
+
+- **Host command time is small.** Commands over 3 ms: 404 ExecIndirect2 (4.5 s total, 4 over 100 ms, max 275 ms), 50 DeleteResource (0.8 s), the rest under 0.3 s. About 6 s of 364 s, so host command execution does not explain the 0.25-5 s stalls.
+- **The display interrupt is never raised during animation.** Register 0x5 read 26,824 times and was always 0, as was the fault register 0xb. The device only raises display interrupts for connect, update and disconnect (`state_machine`), and the display doorbell (0x88) only carries cursor show/move and the live-resize latch. So the device gives the guest no vsync or frame-complete signal at all; pacing is guest-internal.
+- **Stalls sit in the middle of busy periods.** 161 of 176 gaps over 100 ms started within 500 ms of 20+ register/command events. Typical shape: the guest's ISR reads 0x6/0x5/0xb, then nothing for 2-5 s, then a new command. Nothing the device could answer is outstanding in those gaps.
+- **Host CPU contention does show.** Compiling on the host during a vsynctester run gave 38 of 130 s under 40 fps and a 1.8 s gap, so keeping the host quiet (and QEMU threads at a higher priority) matters.
+
+No fix was found: the wait is inside Apple's closed AppleParavirtGPU/WindowServer on the guest side and the device offers no event it could be waiting on. Untested ideas: raise QEMU and vGPU thread priority on the host, and compare against a real Apple paravirt device's interrupt behaviour.
