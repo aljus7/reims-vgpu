@@ -107,13 +107,14 @@ Run commands from the repository root unless noted.
 | --- | --- |
 | `bootstrap.ps1` | Fetches/initializes pinned build sources and installs build dependencies. |
 | `build.ps1 -Profile release` | Builds the Windows Reims Vulkan distribution, ROM, and QEMU. |
+| `build-launcher.ps1` | Builds the optional VM launcher GUI into `build\launcher\ReimsLauncher.exe` (see [windows-manual.md](windows-manual.md)). |
 | `verify.ps1` | Runs the native Windows build checks. |
 | `doctor.ps1 [-RequireWhpx]` | Reports Windows tools, Vulkan, firmware, and optional WHPX readiness. |
 | `prepare-opencore.ps1` | Downloads/verifies the pinned OpenCore release and prepares OpenCore/OVMF files. |
 | `prepare-vm.ps1 -Iso <path>` | Validates recovery/installer media and creates or updates VM configuration and blank disks. |
 | `start.ps1 [-DryRun] [-WithoutInstaller]` | Starts the default source-tree VM; `-DryRun` prints the launch plan without starting QEMU. |
 | `stop.ps1` | Requests a guest shutdown through the local QMP control endpoint. |
-| `New-VM.ps1 -Name <name> [-DiskGiB <size>]` | Creates an independent named VM with a blank disk and fresh VM identity. |
+| `New-VM.ps1 -Name <name> [-DiskGiB <size>] [-Cpus <n>] [-MemoryMiB <mib>]` | Creates an independent named VM with a blank disk and fresh VM identity. |
 | `Start-VM.ps1 [-VMName <name>]` | Starts the default or named VM using the portable-script wrapper. |
 | `Stop-VM.ps1 [-VMName <name>] [-Exit]` | Requests shutdown; `-Exit` also closes QEMU after guest shutdown. |
 | `Export-Runtime.ps1 [-Destination <path>]` | Builds a separate runtime-only folder; refuses to overwrite a destination. |

@@ -48,7 +48,7 @@ from build to a working desktop. In short:
 .\scripts\windows\start.ps1                     # install macOS
 ```
 
-**Required guest fix.** Without `METAL_ERROR_MODE=5` a fresh install has no
+**GUI.** `.\scripts\windows\build-launcher.ps1` builds a small launcher\n(`build\launcher\ReimsLauncher.exe`, keep it inside the project folder) that\ncreates VMs (name, cores, RAM, disk) and starts or stops them.\n\n**Required guest fix.** Without `METAL_ERROR_MODE=5` a fresh install has no
 Dock and blank icons. Two scripts handle it; `prepare-tools.ps1` puts them on a
 `REIMSTOOLS` disk the VM attaches:
 

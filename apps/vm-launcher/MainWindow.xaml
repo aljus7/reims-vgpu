@@ -1,0 +1,73 @@
+<Window x:Class="ReimsLauncher.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Reims macOS VM Launcher" Width="820" Height="600" MinWidth="720" MinHeight="520"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="16">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="16" />
+            <ColumnDefinition Width="290" />
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="8" />
+            <RowDefinition Height="150" />
+        </Grid.RowDefinitions>
+
+        <GroupBox Header="Virtual machines" Grid.Row="0" Grid.Column="0" Padding="8">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                    <CheckBox x:Name="WithoutInstaller" Content="Installer already used (boot installed macOS)" Margin="0,0,0,8" />
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="StartButton" Content="Start" Width="90" Margin="0,0,8,0" Click="Start_Click" />
+                        <Button x:Name="StopButton" Content="Shut down" Width="90" Margin="0,0,8,0" Click="Stop_Click" />
+                        <Button Content="Refresh" Width="80" Click="Refresh_Click" />
+                    </StackPanel>
+                </StackPanel>
+                <ListView x:Name="VmList" SelectionMode="Single" SelectionChanged="VmList_SelectionChanged">
+                    <ListView.View>
+                        <GridView>
+                            <GridViewColumn Header="Name" Width="130" DisplayMemberBinding="{Binding Name}" />
+                            <GridViewColumn Header="CPUs" Width="50" DisplayMemberBinding="{Binding Cpus}" />
+                            <GridViewColumn Header="RAM" Width="70" DisplayMemberBinding="{Binding Ram}" />
+                            <GridViewColumn Header="Disk" Width="70" DisplayMemberBinding="{Binding Disk}" />
+                            <GridViewColumn Header="State" Width="80" DisplayMemberBinding="{Binding State}" />
+                        </GridView>
+                    </ListView.View>
+                </ListView>
+            </DockPanel>
+        </GroupBox>
+
+        <GroupBox Header="New virtual machine" Grid.Row="0" Grid.Column="2" Padding="8">
+            <StackPanel>
+                <TextBlock Text="Name" />
+                <TextBox x:Name="NameBox" Margin="0,2,0,10" MaxLength="32" />
+
+                <TextBlock Text="CPU cores" />
+                <DockPanel Margin="0,2,0,10">
+                    <TextBlock x:Name="CoresLabel" DockPanel.Dock="Right" Width="30" TextAlignment="Right" />
+                    <Slider x:Name="CoresSlider" Minimum="1" Maximum="8" Value="8" IsSnapToTickEnabled="True" TickFrequency="1" ValueChanged="Slider_ValueChanged" />
+                </DockPanel>
+
+                <TextBlock Text="Memory (GiB)" />
+                <DockPanel Margin="0,2,0,10">
+                    <TextBlock x:Name="RamLabel" DockPanel.Dock="Right" Width="30" TextAlignment="Right" />
+                    <Slider x:Name="RamSlider" Minimum="4" Maximum="32" Value="8" IsSnapToTickEnabled="True" TickFrequency="1" ValueChanged="Slider_ValueChanged" />
+                </DockPanel>
+
+                <TextBlock Text="Disk size (GiB, 64 to 2048)" />
+                <TextBox x:Name="DiskBox" Text="128" Margin="0,2,0,10" />
+
+                <TextBlock TextWrapping="Wrap" Foreground="Gray" Margin="0,0,0,10"
+                           Text="Graphics acceleration (Vulkan vGPU) is always on. The disk is sparse and grows as macOS uses it." />
+                <Button x:Name="CreateButton" Content="Create VM" Height="30" Click="Create_Click" />
+            </StackPanel>
+        </GroupBox>
+
+        <GroupBox Header="Log" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Padding="4">
+            <TextBox x:Name="LogBox" IsReadOnly="True" FontFamily="Consolas" FontSize="11"
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap" />
+        </GroupBox>
+    </Grid>
+</Window>

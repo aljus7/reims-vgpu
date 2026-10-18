@@ -23,3 +23,8 @@ __pycache__/
 # reims-ctl's, which is a workspace of its own.
 /target*/
 /crates/reims-ctl/target/
+
+# Extra VMs created by New-VM.ps1 / the launcher, and the launcher's build output.
+/instances/
+/apps/vm-launcher/bin/
+/apps/vm-launcher/obj/

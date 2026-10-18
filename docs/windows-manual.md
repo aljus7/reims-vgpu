@@ -30,6 +30,33 @@ library or in QEMU, and the QEMU executables are stripped. Use
 `-Profile dev` or `-Profile checked` only when developing. The outputs land in
 `build\qemu` (`qemu-system-x86_64.exe`, `reims_vgpu_c.dll`, `ReimsVgpu.rom`).
 
+## 2a. VM launcher app (optional GUI)
+
+A small window to create and run VMs without typing commands. Build it once
+(needs the .NET 10 SDK):
+
+```powershell
+.\scripts\windows\build-launcher.ps1
+```
+
+This writes `build\launcher\ReimsLauncher.exe`. **Where to put it:** leave it
+there, or copy the whole `build\launcher` folder anywhere *inside* the project
+folder (or inside the exported runtime folder). The app finds the project by
+looking upward from its own folder for `scripts\windows\New-VM.ps1`, so it will
+not work if moved outside. It needs PowerShell 7 (`pwsh`) on the PATH.
+
+- **New virtual machine:** name, CPU cores, memory and disk size. Graphics
+  acceleration is always on. It runs `New-VM.ps1`, which creates
+  `instances\<name>\` with a fresh blank disk and its own identity, and builds
+  the `REIMSTOOLS` disk with the guest scripts. `New-VM.ps1` needs the default VM
+  prepared once first (`prepare-opencore.ps1`, `prepare-vm.ps1`).
+- **Start / Shut down** the selected VM. Tick *Installer already used* once
+  macOS is installed. The list refreshes every 5 seconds.
+- You still follow sections 3 to 5 inside the VM (install macOS, then run the
+  two guest scripts).
+
+The app is only a front end for `New-VM.ps1`, `Start-VM.ps1`, `Stop-VM.ps1` and
+`Get-VMList.ps1`; the log pane shows their output.
 ## 3. Install macOS
 
 1. `prepare-vm.ps1 -Iso <your Recovery or installer image>` validates the image
