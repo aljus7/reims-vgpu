@@ -12,7 +12,14 @@ try {
         'vulkan-loader', 'vulkan-validation-layers', 'spirv-tools'
     ) | ForEach-Object { if ($_ -in @('make', 'diffutils', 'bison', 'flex')) { $_ } else { 'mingw-w64-ucrt-x86_64-' + $_ } }
     Invoke-ReimsMsys ('mkdir -p "$XDG_CACHE_HOME/pacman" && pacman -S --noconfirm --needed --cachedir "$XDG_CACHE_HOME/pacman" --logfile "$TEMP/../diagnostics/pacman-install.log" ' + ($packages -join ' '))
-    rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt --component clippy
+    $rustupPath = Join-Path $env:CARGO_HOME 'bin\rustup.exe'
+    if (!(Test-Path -LiteralPath $rustupPath -PathType Leaf)) {
+        $hostRustup = Get-Command rustup.exe -ErrorAction SilentlyContinue
+        if (!$hostRustup) { throw 'Install rustup or mise with the project Rust toolchain before bootstrapping.' }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $rustupPath) | Out-Null
+        Copy-Item -LiteralPath $hostRustup.Source -Destination $rustupPath
+    }
+    & $rustupPath toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt --component clippy
     if ($LASTEXITCODE -ne 0) { throw 'Pinned native Rust install failed' }
     cargo install --locked cbindgen --version 0.29.4
     if ($LASTEXITCODE -ne 0) { throw 'cbindgen install failed' }
