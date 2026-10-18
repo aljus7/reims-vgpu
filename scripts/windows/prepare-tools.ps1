@@ -11,6 +11,7 @@ if (!(Test-Path $key)) {
 }
 Copy-Item -LiteralPath "$key.pub" -Destination (Join-Path $directory 'authorized_key')
 Copy-Item -LiteralPath "$PSScriptRoot/guest-setup.command" -Destination (Join-Path $directory 'setup.command')
+Copy-Item -LiteralPath "$PSScriptRoot/guest-recovery-fix.sh" -Destination (Join-Path $directory 'recovery-fix.sh')
 $image = Join-Path $VmRoot 'tools/ReimsTools.img'
 Invoke-ReimsTool (Get-ReimsTool 'qemu-img.exe') @('convert','-f','vvfat','-O','raw',('fat:'+$directory.Replace('\','/')),"$image.partial") | Out-Null
 $python = Get-ReimsTool 'python.exe'

@@ -214,7 +214,54 @@ After moving the complete runtime folder, the first start/stop/VM creation
 updates saved paths and QCOW2 backing links. Keep the full folder layout and
 never relocate it while a VM is running.
 
+## After installing: blank Dock and icons (required Metal setting)
+
+A new Tahoe install shows only the wallpaper, or a desktop with no Dock and
+blank icons, until Metal's error mode is set once. Measured here on this
+Windows build: System Settings was slow, icons were blank, and the Dock was
+missing; setting the key brought them back. Mission Control still ran at
+roughly 14–29 fps afterwards, so this fixes the icon service, not general
+frame rate.
+
+1. Stop the VM, then run `.\scripts\windows\prepare-tools.ps1`. It builds
+   `vm\tools\ReimsTools.img`, now including `recovery-fix.sh`; `start.ps1`
+   attaches it automatically.
+2. Start the VM, choose OpenCore's **Recovery** entry, and open
+   **Utilities → Terminal**.
+3. Run, then reboot into the installed system:
+
+   ```sh
+   sh /Volumes/*/recovery-fix.sh
+   reboot
+   ```
+
+   Equivalent manual commands (the Data volume here was `MACOS - Data`; the
+   quotes matter):
+
+   ```sh
+   cd "/Volumes/MACOS - Data/Library/Preferences"
+   defaults write "$PWD/.GlobalPreferences" METAL_ERROR_MODE -int 5
+   chmod 644 .GlobalPreferences.plist
+   ```
+
+   The `chmod 644` is required: `defaults` leaves mode 0600, which user
+   processes cannot read. Do not write to `/Volumes/* - Data/...` directly,
+   because the glob is not expanded and creates a path in Recovery's RAM disk.
+4. On an already running desktop, `guest-setup.command` on the same tools
+   volume (or `sudo defaults write /Library/Preferences/.GlobalPreferences
+   METAL_ERROR_MODE -int 5`, then a restart) applies it too.
+
+This cannot be fully automatic during installation: the installed Data
+volume does not exist until the installer finishes, and the guest must boot
+into Recovery to write to it before the first desktop session. Undo with
+`sudo defaults delete /Library/Preferences/.GlobalPreferences
+METAL_ERROR_MODE`. Background and measurements: `docs/qemu.md`, “x86-64
+macOS guests: Metal’s error mode”.
+
 ## Troubleshooting and limitations
+
+- **Dock/icons missing or very slow after install:** see the Metal setting
+  above.
 
 - **WHPX unavailable:** enable *Windows Hypervisor Platform* in Windows
   Features, restart Windows, and rerun `.\scripts\windows\doctor.ps1
