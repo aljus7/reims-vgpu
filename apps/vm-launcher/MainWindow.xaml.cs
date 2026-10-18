@@ -28,10 +28,12 @@ public partial class MainWindow : Window
         if (_root is null)
         {
             Log("Could not find the reims-vgpu folder (scripts\\windows\\New-VM.ps1). Put the app inside the project or runtime folder.");
-            CreateButton.IsEnabled = StartButton.IsEnabled = StopButton.IsEnabled = false;
+            CreateButton.IsEnabled = StartButton.IsEnabled = StopButton.IsEnabled = BrowseButton.IsEnabled = false;
+            ImageStatus.Text = "Unavailable.";
             return;
         }
         Log($"Project folder: {_root}");
+        UpdateImageStatus();
         _timer.Tick += async (_, _) => { if (!_busy) await RefreshAsync(); };
         _timer.Start();
         Loaded += async (_, _) => await RefreshAsync();
@@ -95,7 +97,40 @@ public partial class MainWindow : Window
         var row = VmList.SelectedItem as VmRow;
         StartButton.IsEnabled = !_busy && row is { Running: false };
         StopButton.IsEnabled = !_busy && row is { Running: true };
-        CreateButton.IsEnabled = !_busy && _root is not null;
+        CreateButton.IsEnabled = !_busy && _root is not null && ImageReady;
+        BrowseButton.IsEnabled = !_busy && _root is not null;
+    }
+
+    private string ImagePath => Path.Combine(_root ?? "", "vm", "media", "Tahoe-Recovery-GPT.img");
+    private bool ImageReady => _root is not null && File.Exists(ImagePath);
+
+    private void UpdateImageStatus()
+    {
+        ImageStatus.Text = ImageReady
+            ? $"Ready ({new FileInfo(ImagePath).Length / 1048576} MiB). Browse to replace it."
+            : "Missing. Browse to your GPT Recovery image (.img) before creating a VM.";
+        ImageStatus.Foreground = ImageReady ? System.Windows.Media.Brushes.DarkGreen : System.Windows.Media.Brushes.Firebrick;
+    }
+
+    private async void Browse_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog { Title = "Select macOS Recovery image", Filter = "Disk images (*.img;*.raw)|*.img;*.raw|All files (*.*)|*.*" };
+        if (dialog.ShowDialog(this) != true) return;
+        string source = dialog.FileName, target = ImagePath;
+        if (string.Equals(Path.GetFullPath(source), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase)) { UpdateImageStatus(); return; }
+        _busy = true; UpdateButtons();
+        Log($"> Copying Recovery image to {target} ...");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            string temp = target + ".partial";
+            await Task.Run(() => { File.Copy(source, temp, true); File.Move(temp, target, true); });
+            Log("Recovery image copied. It is validated when you create a VM.");
+        }
+        catch (Exception ex) { Log("Could not copy the image: " + ex.Message); }
+        _busy = false;
+        UpdateImageStatus();
+        UpdateButtons();
     }
 
     private void UpdateLabels()

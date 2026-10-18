@@ -59,6 +59,10 @@
                 <TextBlock Text="Disk size (GiB, 64 to 2048)" />
                 <TextBox x:Name="DiskBox" Text="128" Margin="0,2,0,10" />
 
+                <TextBlock Text="macOS Recovery image" />
+                <TextBlock x:Name="ImageStatus" TextWrapping="Wrap" Margin="0,2,0,4" />
+                <Button x:Name="BrowseButton" Content="Browse..." Margin="0,0,0,10" Click="Browse_Click" />
+
                 <TextBlock TextWrapping="Wrap" Foreground="Gray" Margin="0,0,0,10"
                            Text="Graphics acceleration (Vulkan vGPU) is always on. The disk is sparse and grows as macOS uses it." />
                 <Button x:Name="CreateButton" Content="Create VM" Height="30" Click="Create_Click" />
