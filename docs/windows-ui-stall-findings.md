@@ -102,3 +102,7 @@ A WindowServer sample with the popover open is ~100% idle, so compositing the po
 ### Intermittent vsynctester dips (steady state)
 
 Over two 90-110 s runs with a single vsynctester tab and nothing else touched: 60 fps almost all the time (gaps ~18-20 ms), with short dips: one to 10-30 fps for ~2 s (gap up to 260 ms) and several of 41-50 fps (gaps 45-95 ms). Guest per-process CPU (`top`, which itself costs ~24%) showed Safari WebKit ~22%, WindowServer ~19%, kernel_task ~18%; the only coinciding background load seen was a `WeatherWidget` burst (~22%) and WebKit bursts to 25-26%. GPU time stays ~2 ms, no host-side stall appeared. Likely causes: guest background daemons (widgets, mds, icon/asset caches) taking vCPU time, or host scheduling of the QEMU threads; not proven. To isolate: disable widgets / Spotlight in the guest, or log host-side per-thread CPU alongside.
+
+### vCPU speed and guest timer stalls
+
+Same perl loop (30M iterations): guest 2.17 s vs host 1.73 s, so a vCPU runs at ~80% of native speed (WHPX overhead is small for pure compute). A 20 s guest timer test (7595 x 2 ms sleeps, vsynctester running): median overshoot 0.54 ms, p99 1.3 ms, max 12 ms, none over 50 ms. So the guest scheduler/vCPUs do not stall; the 0.25-5 s stalls seen in rendering are not CPU starvation or vCPU descheduling. They happen on the app/WindowServer<->GPU-driver wait path (or in cold-start single-thread work).
