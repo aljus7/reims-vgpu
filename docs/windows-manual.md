@@ -11,9 +11,20 @@ repository. Build details and the full script list are in
 
 ## 1. The short version
 
+**From the release ZIP (no build tools needed):**
+
+```powershell
+.\install.ps1            # asks for a base folder (Enter = %USERPROFILE%\ReimsVM); optional Recovery image
+# open ReimsLauncher (Start Menu), start the VM, install macOS (section 3)
+# then guest script 1 in Recovery (section 4), and script 2 in macOS (section 5)
+```
+
+**From source** (to build or develop; see [windows-build.md](windows-build.md)):
+
 ```powershell
 .\scripts\windows\bootstrap.ps1                  # once: build dependencies
 .\scripts\windows\build.ps1                      # release build, no debug info
+.\scripts\windows\build-launcher.ps1             # optional GUI
 .\scripts\windows\doctor.ps1 -RequireWhpx        # check the host
 .\scripts\windows\prepare-opencore.ps1           # OpenCore + firmware
 .\scripts\windows\prepare-vm.ps1 -Iso 'C:\path\Recovery.img'
@@ -39,9 +50,11 @@ A small window to create and run VMs without typing commands. Build it once
 .\scripts\windows\build-launcher.ps1
 ```
 
-This writes `build\launcher\ReimsLauncher.exe`. **Where to put it:** leave it
-there, or copy the whole `build\launcher` folder anywhere *inside* the project
-folder (or inside the exported runtime folder). The app finds the project by
+This writes one self-contained file, `build\launcher\ReimsLauncher.exe` (no .NET
+install is needed to run it; the SDK is needed only to build it). In the release
+ZIP install it already sits in the install folder. **Where to put it:** leave it
+there, or copy the file anywhere *inside* the project folder (or the install
+folder). The app finds the project by
 looking upward from its own folder for `scripts\windows\New-VM.ps1`, so it will
 not work if moved outside. It needs PowerShell 7 (`pwsh`) on the PATH.
 

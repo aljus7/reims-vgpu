@@ -24,5 +24,13 @@ try {
     cargo install --locked cbindgen --version 0.29.4
     if ($LASTEXITCODE -ne 0) { throw 'cbindgen install failed' }
     Invoke-ReimsMsys 'pacman -Q > "$TEMP/../diagnostics/msys2-packages-current.txt"'
+    if (!(Get-Command dotnet -ErrorAction SilentlyContinue) -or ((dotnet --list-sdks) -notmatch '^10\.')) {
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            winget install --id Microsoft.DotNet.SDK.10 -e --accept-source-agreements --accept-package-agreements
+            if ($LASTEXITCODE -ne 0) { Write-Warning 'Could not install the .NET 10 SDK; install it manually to build the launcher.' }
+        } else {
+            Write-Warning 'The .NET 10 SDK is missing (needed only for build-launcher.ps1): https://dotnet.microsoft.com/download'
+        }
+    }
     & (Join-Path $PSScriptRoot 'doctor.ps1')
 } finally { Pop-Location }

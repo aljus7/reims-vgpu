@@ -50,19 +50,18 @@ The Makefile's header lists every target (`bless`, `coverage`, `qemu`, `vm`,
 | what | where |
 |---|---|
 | the Cargo workspace and its six crates | `Cargo.toml`, `crates/` |
-| `reims-ctl`, the VM manager users run, and its installer | `crates/reims-ctl` (a workspace of its own, linking nothing of the library), `scripts/install-ctl.sh`; reims-util, which it runs to make an x86-64 VM's OpenCore image and download its installer, is pinned in `crates/reims-ctl/src/reims_util.rs` |
 | the C API | `crates/reims-vgpu-c/include/reims_vgpu.h`, specified in [docs/api.md](docs/api.md) |
 | isolated tasks | `crates/reims-vgpu-core/src/tasks/isolation`, `crates/reims-vgpu-core/src/gpu_task` |
 | the display's and XR10's shaders | `crates/reims-vgpu-metal/src/gpu/shaders.metal` |
 | the Vulkan platform | `crates/reims-vgpu-vulkan`, over metal2vulkan's runtime, at the commit of its public repository `Cargo.toml` names; what its defaults trade against Metal's answers is [docs/accuracy-ledger.md](docs/accuracy-ledger.md) |
 | the Vulkan platform's metallibs, which a build off a Mac copies | `crates/reims-vgpu-vulkan/metallibs`, written on a Mac by `cargo xtask metallibs` (README.md, Building) |
-| a display's own window, and the register of what it does | `crates/reims-vgpu-window`, its `features.md` and its manual walk on macOS, `scripts/walk_window_macos.sh`; the wiring is `crates/reims-vgpu/src/window.rs` |
+| a display's own window, and the register of what it does | `crates/reims-vgpu-window`, its `features.md` and its manual walk on macOS; the wiring is `crates/reims-vgpu/src/window.rs` |
 | the dist tree QEMU and the suite link | `xtask/src/dist.rs` (`cargo xtask dist`) |
 | the option ROM `apple-gfx-pci` loads | `firmware/`, described in [docs/architecture.md](docs/architecture.md) section 11.4 |
 | `cargo xtask` | `xtask/` |
 | the behaviour-lock suite | `tests/suite` ([README](tests/suite/README.md)); its runner is `tests/suite/runner/pgrun.m`, and its specification and the guest ABI are [docs/testing.md](docs/testing.md) |
 | the pins | `crates/reims-vgpu-c/tests/pins` (the C API) |
-| QEMU and VM boots | `vendor/qemu`, `scripts/run_vmapple.sh`, `scripts/vm_drive.py`, [docs/qemu.md](docs/qemu.md) |
+| QEMU and VM boots | `vendor/qemu`, [docs/qemu.md](docs/qemu.md) |
 | the architecture | [docs/architecture.md](docs/architecture.md) |
 | traps the suite and reviews caught | [docs/lessons.md](docs/lessons.md) |
 | measured platform facts | the docs of the modules that rely on them |
@@ -122,7 +121,6 @@ under the check's own load and pass run again alone.
 | a `.metal` source of the Vulkan crate, or the metal crate's `shaders.metal` | `cargo xtask metallibs` on a Mac, committing the metallibs it writes with the change; then the library's checks |
 | the suite's runner, `normalize.py` or scenarios | `make test` on the cases it affects, and the records it re-records (below) |
 | `xtask/` | `cargo test -p xtask`, rustfmt and clippy on it |
-| `crates/reims-ctl` | `cargo test`, `cargo fmt --check` and `cargo clippy --all-targets` in it (`cargo xtask check` does not reach it); a change to the QEMU command it builds, or to `scripts/install-ctl.sh`, also needs an install and a VM boot on each host it touches |
 | `firmware/` | build it (`make -C firmware`); a change not meant to alter what the guest's firmware sees keeps the ROM's bytes |
 | `vendor/qemu` | build it (`make qemu`) and realize the devices paused (`-S`); a change to `hw/display/apple-gfx*.c`, or to what QEMU calls, also needs a VM boot ([docs/lessons.md](docs/lessons.md), [docs/qemu.md](docs/qemu.md)) |
 | docs and comments | nothing |

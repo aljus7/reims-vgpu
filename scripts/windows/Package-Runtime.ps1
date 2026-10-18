@@ -25,6 +25,8 @@ if ($Destination.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCas
 }
 $requiredFiles = @(
     'README.txt',
+    'install.ps1',
+    'ReimsLauncher.exe',
     'New-VM.ps1',
     'Start-VM.ps1',
     'Stop-VM.ps1',
@@ -90,26 +92,31 @@ Requirements: 64-bit Windows 11, PowerShell 7.2+, Windows Hypervisor Platform
 (WHPX), and a compatible Vulkan-capable GPU/driver for accelerated graphics.
 Actual guest boot and GPU performance must be tested on your host.
 
-1. Extract the whole ZIP to a writable folder; preserve its directory layout.
-2. Create a private OpenCore identity before booting:
+1. Extract the whole ZIP to any folder; preserve its directory layout.
+2. Run the installer in PowerShell 7.2+:
 
-   .\scripts\windows\prepare-opencore.ps1 -Version 1.0.8 `
-     -FirmwareDirectory .\runtime\msys2\ucrt64\share\qemu `
-     -GenerateIdentity -Rebuild
+   .\install.ps1
 
-3. Put a compatible x86-64 Recovery/installer image at
-   vm\media\Tahoe-Recovery-GPT.img. Validate and select it for the default VM:
+   It asks for a base folder (Enter = %USERPROFILE%\ReimsVM), copies the
+   runtime there, creates the VM folders and firmware, generates this VM's
+   own OpenCore identity, builds the guest-tools disk and, if you give it a
+   macOS Recovery image, prepares the default VM. Options: -InstallPath,
+   -RecoveryImage, -NoPrompt.
+3. Open ReimsLauncher.exe from the install folder (a Start Menu shortcut is
+   created), or use the scripts:
 
-   .\scripts\windows\prepare-vm.ps1 -Iso .\vm\media\Tahoe-Recovery-GPT.img
-   .\Start-VM.ps1 -DryRun
    .\Start-VM.ps1
+   .\Start-VM.ps1 -WithoutInstaller      (after macOS is installed)
+   .\Stop-VM.ps1 -Exit
+   .\New-VM.ps1 -Name test -DiskGiB 256 -Cpus 8 -MemoryMiB 8192
 
-After macOS is installed, use .\Start-VM.ps1 -WithoutInstaller. To create a
-separate blank VM, keep the Recovery image at the path above and run:
+After installing macOS, follow docs\windows-manual.md: run the two guest
+scripts (Metal fix from Recovery, then optional speed-ups). Without the Metal
+fix there is no Dock and icons stay blank.
 
-   .\New-VM.ps1 -Name test -DiskGiB 256
-   .\Start-VM.ps1 -VMName test
-   .\Stop-VM.ps1 -VMName test -Exit
+Without a Recovery image the installer still completes; put one at
+vm\media\Tahoe-Recovery-GPT.img and run
+.\scripts\windows\prepare-vm.ps1 -Iso .\vm\media\Tahoe-Recovery-GPT.img
 
 The default VM disk is a sparse 128 GiB QCOW2 disk. New VMs have independent
 disk chains, NVRAM, OpenCore configuration, identities, and loopback ports.

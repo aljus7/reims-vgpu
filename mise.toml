@@ -35,3 +35,8 @@ run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\E
 description = "Create a runtime ZIP outside final, excluding Apple Recovery media"
 run = "echo This task requires Windows and PowerShell 7.2 or newer."
 run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\Package-Runtime.ps1 -RuntimeRoot final -Destination artifacts\\reims-vgpu-windows-runtime.zip"
+
+[tasks."windows:release"]
+description = "Build the release ZIP (launcher, runtime, install.ps1) in artifacts"
+run = "echo This task requires Windows and PowerShell 7.2 or newer."
+run_windows = "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\\windows\\Package-Release.ps1"

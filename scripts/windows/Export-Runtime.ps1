@@ -161,11 +161,26 @@ try {
 
     $operationalScripts = @(
         'environment.ps1','usb.ps1','prepare-opencore.ps1','prepare-vm.ps1',
-        'start.ps1','stop.ps1','qmp.ps1'
+        'start.ps1','stop.ps1','qmp.ps1','prepare-tools.ps1','Get-VMList.ps1',
+        'guest-setup.command','guest-1-recovery-setup.sh','guest-2-macos-optimize.sh'
     )
     foreach ($name in $operationalScripts) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $partial 'scripts\windows')
     }
+    $launcher = Join-Path $ProjectRoot 'build\launcher\ReimsLauncher.exe'
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) {
+        Copy-Item -LiteralPath $launcher -Destination $partial
+    }
+    $installer = Join-Path $PSScriptRoot 'install.ps1'
+    if (Test-Path -LiteralPath $installer -PathType Leaf) {
+        Copy-Item -LiteralPath $installer -Destination $partial
+    }
+    $docsOut = Join-Path $partial 'docs'
+    New-Item -ItemType Directory -Force -Path $docsOut | Out-Null
+    foreach ($doc in @('windows-manual.md','windows-build.md','windows-vm.md','KNOWN_ISSUES.md')) {
+        Copy-Item -LiteralPath (Join-Path $ProjectRoot "docs\$doc") -Destination $docsOut
+    }
+    Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE') -Destination $partial
     foreach ($name in @('New-VM.ps1','Start-VM.ps1','Stop-VM.ps1','Relocate-VM.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $partial
     }

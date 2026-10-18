@@ -28,7 +28,7 @@ if ([System.Runtime.Intrinsics.X86.X86Base]::IsSupported) {
     }
 }
 $tools = [ordered]@{}
-foreach ($name in @('git', 'rustup', 'cargo', 'rustc', 'clang', 'lld-link', 'llvm-objcopy', 'cmake', 'ninja', 'pkg-config', 'python')) {
+foreach ($name in @('git', 'rustup', 'cargo', 'rustc', 'clang', 'lld-link', 'llvm-objcopy', 'cmake', 'ninja', 'pkg-config', 'python', 'dotnet')) {
     $command = Get-Command $name -ErrorAction SilentlyContinue
     $tools[$name] = if ($command) { $command.Source } else { $null }
 }

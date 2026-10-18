@@ -19,10 +19,8 @@ __pycache__/
 # Editor / OS
 .DS_Store
 
-# The Cargo workspace's build trees (target, and any target-* beside it), and
-# reims-ctl's, which is a workspace of its own.
+# The Cargo workspace's build trees (target, and any target-* beside it).
 /target*/
-/crates/reims-ctl/target/
 
 # Extra VMs created by New-VM.ps1 / the launcher, and the launcher's build output.
 /instances/

@@ -21,6 +21,9 @@ pinned Rust toolchain and `mise run windows:*` shortcuts.
   components, and the pinned OpenCore release.
 - Windows Hypervisor Platform (WHPX), enabled in Windows Features, followed
   by a Windows restart, for normal VM execution.
+- The .NET 10 SDK, only to build the launcher app (`winget install
+  Microsoft.DotNet.SDK.10`). The built launcher is self-contained and needs no
+  .NET on the machine that runs it. `bootstrap.ps1` checks for it.
 - A Vulkan-capable Windows GPU and driver supported by the host build.
 - A recovery or installer image you are entitled to use. The Tahoe Recovery
   image is network recovery, not a full offline installer.
@@ -108,6 +111,8 @@ Run commands from the repository root unless noted.
 | `bootstrap.ps1` | Fetches/initializes pinned build sources and installs build dependencies. |
 | `build.ps1 -Profile release` | Builds the Windows Reims Vulkan distribution, ROM, and QEMU. |
 | `build-launcher.ps1` | Builds the optional VM launcher GUI into `build\launcher\ReimsLauncher.exe` (see [windows-manual.md](windows-manual.md)). |
+| `Package-Release.ps1 [-Version <v>]` | One step to a GitHub release ZIP: builds the launcher, exports the runtime, packages `artifacts\reims-vgpu-windows-<v>.zip` and its `.sha256`. |
+| `install.ps1` | In the release ZIP only. Asks for a base folder, installs the runtime, firmware and VM structure there. |
 | `verify.ps1` | Runs the native Windows build checks. |
 | `doctor.ps1 [-RequireWhpx]` | Reports Windows tools, Vulkan, firmware, and optional WHPX readiness. |
 | `prepare-opencore.ps1` | Downloads/verifies the pinned OpenCore release and prepares OpenCore/OVMF files. |
@@ -140,7 +145,8 @@ default location. Do not move or copy a VM while QEMU is running.
 
 ## Export and use a portable runtime
 
-After building QEMU and preparing a recovery image in the source VM, export a
+After building QEMU and preparing a recovery image in the source VM (the
+launcher is included when `build-launcher.ps1` has been run), export a
 runtime-only directory:
 
 ```powershell
@@ -175,45 +181,47 @@ after copying or downloading the ZIP.
 
 ### Set up the packaged runtime
 
-Extract the ZIP to a writable folder and preserve its directory structure.
-Before the first boot, make a private OpenCore identity for this VM:
+Extract the ZIP anywhere and run the installer in PowerShell 7.2+:
 
 ```powershell
-.\scripts\windows\prepare-opencore.ps1 `
-  -Version 1.0.8 `
-  -FirmwareDirectory '.\runtime\msys2\ucrt64\share\qemu' `
-  -GenerateIdentity -Rebuild
+.\install.ps1                          # asks for the base folder
+.\install.ps1 -InstallPath D:\ReimsVM  # or give it; add -NoPrompt to skip questions
 ```
 
-Provide a compatible recovery or installer image you are licensed to use.
-For the default VM, copy it to
-`vm\media\Tahoe-Recovery-GPT.img`, then have the packaged scripts validate it:
+The installer copies the runtime to the base folder (default
+`%USERPROFILE%\ReimsVM`), creates `vm\` (disks, NVRAM, firmware, tools disk),
+generates this VM's own OpenCore identity, and optionally attaches a Recovery
+image (`-RecoveryImage <path>`, copied to `vm\media\Tahoe-Recovery-GPT.img`
+and validated). It adds Start Menu and optional desktop shortcuts for
+`ReimsLauncher.exe`. Re-running it on an existing install updates the program
+files and keeps `vm\` and `instances\`.
+
+Without a Recovery image, put one at `vm\media\Tahoe-Recovery-GPT.img` later
+and run `.\scripts\windows\prepare-vm.ps1 -Iso .\vm\media\Tahoe-Recovery-GPT.img`.
+Then start with the launcher or the scripts:
 
 ```powershell
-.\scripts\windows\prepare-vm.ps1 -Iso '.\vm\media\Tahoe-Recovery-GPT.img'
-.\Start-VM.ps1 -DryRun
-.\Start-VM.ps1
+.\Start-VM.ps1                   # install macOS
+.\Start-VM.ps1 -WithoutInstaller # afterwards
+.\Stop-VM.ps1 -Exit
+.\New-VM.ps1 -Name test -DiskGiB 256 -Cpus 8 -MemoryMiB 8192
 ```
 
-`prepare-vm.ps1` updates the default VM's media selection while retaining its
-existing blank disk, NVRAM, and settings. To create another VM, keep the
-recovery image at that package path so `New-VM.ps1` can use it:
+After moving the complete install folder, the first start/stop/VM creation
+updates saved paths and QCOW2 backing links. Never relocate it while a VM runs.
+
+### Build the release ZIP in one step
 
 ```powershell
-.\New-VM.ps1 -Name test -DiskGiB 256
-.\Start-VM.ps1 -VMName test
+.\scripts\windows\Package-Release.ps1 -Version 0.1.0
 ```
 
-After installation, start without the Recovery media:
-
-```powershell
-.\Start-VM.ps1 -WithoutInstaller
-```
-
-Use `.\Stop-VM.ps1 -Exit` for a guest shutdown followed by closing QEMU.
-After moving the complete runtime folder, the first start/stop/VM creation
-updates saved paths and QCOW2 backing links. Keep the full folder layout and
-never relocate it while a VM is running.
+This needs the finished build (`build.ps1`) and a prepared default VM, builds
+the launcher, and writes `artifacts\reims-vgpu-windows-0.1.0.zip` plus a
+`.sha256` file, ready to attach to a GitHub release. The ZIP contains QEMU, the
+Reims DLL and option ROM, firmware tooling, the launcher, scripts, the guest
+scripts, `install.ps1` and the manual. It never contains Apple media, VM disks
+in use, or your identity.
 
 ## After installing: blank Dock and icons (required Metal setting)
 
