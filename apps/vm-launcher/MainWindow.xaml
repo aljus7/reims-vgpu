@@ -18,7 +18,7 @@
         <GroupBox Header="Virtual machines" Grid.Row="0" Grid.Column="0" Padding="8">
             <DockPanel>
                 <StackPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
-                    <CheckBox x:Name="DarkMode" Content="Dark mode" Checked="Theme_Changed" Unchecked="Theme_Changed" Margin="0,0,0,8" />
+                    <CheckBox x:Name="DarkMode" Content="Dark mode (mixed = Windows theme)" IsThreeState="True" IsChecked="{x:Null}" Checked="Theme_Changed" Unchecked="Theme_Changed" Indeterminate="Theme_Changed" Margin="0,0,0,8" />
                     <TextBlock Text="Selected VM: total vCPUs / threads per core (VM must be stopped)" TextWrapping="Wrap" />
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,8">
                         <TextBox x:Name="SelectedCpus" Width="45" />

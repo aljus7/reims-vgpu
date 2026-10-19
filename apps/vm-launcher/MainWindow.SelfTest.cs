@@ -12,6 +12,7 @@ public partial class MainWindow
         string[] args = Environment.GetCommandLineArgs();
         string directory = Path.GetFullPath(args[Array.IndexOf(args, "--self-test") + 1]);
         Directory.CreateDirectory(directory);
+        _themeFile = Path.Combine(directory, "theme.json");
         try
         {
             int checks = 0;
@@ -20,6 +21,9 @@ public partial class MainWindow
                 if (!condition) throw new InvalidOperationException(message);
                 checks++;
             }
+            if (File.Exists(_themeFile)) File.Delete(_themeFile);
+            LoadTheme();
+            Check(DarkMode.IsChecked is null, "First launch must follow Windows theme.");
             var original = new VmRow("Default", 8, 1, "8 GiB", "128 GiB", "Stopped", false);
             var named = original with { Name = "Test", Threads = 2 };
             var running = named with { Running = true };
@@ -50,6 +54,9 @@ public partial class MainWindow
             foreach (bool dark in new[] { true, false })
             {
                 DarkMode.IsChecked = dark;
+                Check(System.Text.Json.JsonSerializer.Deserialize<bool?>(File.ReadAllText(_themeFile)) == dark, "Theme must persist.");
+                LoadTheme();
+                Check(DarkMode.IsChecked == dark, "Saved theme must survive reload.");
                 UpdateLayout();
                 Check((((SolidColorBrush)Background).Color.R < 128) == dark,
                     "Theme must update the window.");
@@ -65,6 +72,9 @@ public partial class MainWindow
                 using var output = File.Create(Path.Combine(directory, dark ? "dark.png" : "light.png"));
                 encoder.Save(output);
             }
+            DarkMode.IsChecked = null;
+            LoadTheme();
+            Check(DarkMode.IsChecked is null, "Windows theme preference must survive reload.");
             File.WriteAllText(Path.Combine(directory, "result.txt"), $"PASS: {checks} launcher UI assertions.");
             Application.Current.Shutdown(0);
         }

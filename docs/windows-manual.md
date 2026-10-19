@@ -74,7 +74,10 @@ not work if moved outside. It needs PowerShell 7 (`pwsh`) on the PATH.
   default/named VMs are refused. Fully exit QEMU first; guest shutdown alone
   may leave its process running. Files outside that VM folder are not deleted.
 - **Dark mode:** switch the launcher's controls, VM list and log between
-  dark and light palettes. This changes only the launcher, not macOS.
+  dark and light palettes. The mixed checkbox state follows Windows (the
+  first-run default). Your choice is saved per Windows user in
+  `%LOCALAPPDATA%\ReimsLauncher\theme.json`. This changes only the launcher,
+  not macOS.
 - You still follow sections 3 to 5 inside the VM (install macOS, then run the
   two guest scripts).
 

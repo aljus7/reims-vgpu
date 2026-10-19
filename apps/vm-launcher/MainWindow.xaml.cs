@@ -21,6 +21,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(5) };
     private bool _busy;
     private string? _cpuSelection;
+    private bool _themeReady;
+    private string _themeFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReimsLauncher", "theme.json");
 
     public MainWindow()
     {
@@ -35,6 +37,7 @@ public partial class MainWindow : Window
             Loaded += (_, _) => RunSelfTest();
             return;
         }
+        LoadTheme();
         if (_root is null)
         {
             Log("Could not find the reims-vgpu folder (scripts\\windows\\New-VM.ps1). Put the app inside the project or runtime folder.");
@@ -122,7 +125,7 @@ public partial class MainWindow : Window
         ImageStatus.Text = ImageReady
             ? $"Ready ({new FileInfo(ImagePath).Length / 1048576} MiB). Browse to replace it."
             : "Missing. Browse to your GPT Recovery image (.img) before creating a VM.";
-        bool dark = DarkMode.IsChecked == true;
+        bool dark = ((SolidColorBrush)Background).Color.R < 128;
         ImageStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(
             ImageReady ? (dark ? "#79D28B" : "#267335") : (dark ? "#FF9999" : "#A02020")));
     }
@@ -239,9 +242,41 @@ public partial class MainWindow : Window
 
     private void Theme_Changed(object sender, RoutedEventArgs e)
     {
-        bool dark = DarkMode.IsChecked == true;
+        if (!_themeReady) return;
+        ApplyTheme();
+        try { SaveTheme(); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { Log("Could not save theme preference: " + error.Message); }
+    }
+
+    private void LoadTheme()
+    {
+        _themeReady = false;
+        try
+        {
+            DarkMode.IsChecked = File.Exists(_themeFile)
+                ? JsonSerializer.Deserialize<bool?>(File.ReadAllText(_themeFile)) : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            Log("Could not load theme preference; using Windows theme: " + error.Message);
+            DarkMode.IsChecked = null;
+        }
+        _themeReady = true;
+        ApplyTheme();
+    }
+
+    private void SaveTheme()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(_themeFile)!);
+        File.WriteAllText(_themeFile + ".new", JsonSerializer.Serialize(DarkMode.IsChecked));
+        File.Move(_themeFile + ".new", _themeFile, true);
+    }
+
+    private void ApplyTheme()
+    {
 #pragma warning disable WPF0001 // Runtime Fluent theme switching is experimental in .NET 10.
-        Application.Current.ThemeMode = dark ? ThemeMode.Dark : ThemeMode.Light;
+        Application.Current.ThemeMode = DarkMode.IsChecked switch { true => ThemeMode.Dark, false => ThemeMode.Light, null => ThemeMode.System };
 #pragma warning restore WPF0001
         if (ImageStatus is not null) UpdateImageStatus();
     }
