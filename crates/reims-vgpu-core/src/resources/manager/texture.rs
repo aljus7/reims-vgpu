@@ -63,7 +63,7 @@ use crate::platform::values::TextureDesc;
 use crate::platform::{Handle, Platform};
 use crate::raise::{Kept, keep_forever};
 use crate::raise::{OnFault, RaiseResult};
-use crate::resources::manager::create::{CreateEnv, refuse};
+use crate::resources::manager::create::{CreateEnv, refuse, view_or_refresh};
 use crate::resources::manager::records::{
     OperationHeader, placement_field0, placement_resource_id, set_placement_field0,
     set_placement_resource_id,
@@ -1057,10 +1057,14 @@ fn new_view<P: Platform, E: CreateEnv<P>>(
     placement: Option<GuestPtr>,
 ) -> RaiseResult<Result<E::Res, String>> {
     let view = refuse!(View::read(cursor, kind));
-    let base = refuse!(get_base(hold, env, view.base_reference(), "texture")?);
-    let base_texture = match &base {
-        Some(b) => env.res_get_texture(b)?,
-        None => None,
+    let base_reference = view.base_reference();
+    let base = refuse!(get_base(hold, env, base_reference, "texture")?);
+    let (base, base_texture) = match base {
+        Some(b) => {
+            let (b, t) = view_or_refresh(hold, env, base_reference, b, |b| env.res_get_texture(b))?;
+            (Some(b), t)
+        }
+        None => (None, None),
     };
     let index = placement_index(placement);
     // The view is not checked for nil.
@@ -1105,9 +1109,12 @@ fn new_texture_over_buffer<P: Platform, E: CreateEnv<P>>(
     let (buffer_reference, offset, bytes_per_row, serialized) =
         refuse!(read.map_err(|e| format!("buffer texture command not readable: {e}")));
     let base = refuse!(get_base(hold, env, buffer_reference, "buffer")?);
-    let buffer = match &base {
-        Some(b) => env.res_get_buffer(b)?,
-        None => None,
+    let (base, buffer) = match base {
+        Some(b) => {
+            let (b, v) = view_or_refresh(hold, env, buffer_reference, b, |b| env.res_get_buffer(b))?;
+            (Some(b), v)
+        }
+        None => (None, None),
     };
     let descriptor = serialized.build(env.platform().as_ref(), placement_index(placement));
     descriptor.set_resource_options(buffer.as_ref().map_or(0, |b| b.resource_options()));
@@ -1154,9 +1161,12 @@ fn new_texture_in_heap<P: Platform, E: CreateEnv<P>>(
     let (heap_reference, offset, serialized) =
         refuse!(read.map_err(|e| format!("heap texture command not readable: {e}")));
     let base = refuse!(get_base(hold, env, heap_reference, "heap")?);
-    let heap = match &base {
-        Some(b) => env.res_get_heap(b)?,
-        None => None,
+    let (base, heap) = match base {
+        Some(b) => {
+            let (b, h) = view_or_refresh(hold, env, heap_reference, b, |b| env.res_get_heap(b))?;
+            (Some(b), h)
+        }
+        None => (None, None),
     };
     let descriptor = serialized.build(env.platform().as_ref(), placement_index(placement));
     descriptor.set_resource_options(heap.as_ref().map_or(0, |h| h.resource_options()));

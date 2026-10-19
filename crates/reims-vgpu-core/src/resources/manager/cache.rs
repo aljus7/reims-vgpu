@@ -21,9 +21,20 @@ use crate::resources::manager::states::{
     RenderPipelineStates, SamplerStates,
 };
 use crate::resources::manager::{DeathKind, ResourceManager};
-use crate::resources::resource::AnyResource;
-use crate::resources::resource::Resource;
+use crate::resources::resource::{AnyResource, Resource};
+use crate::resources::{Op, RaiseKind, raised_kind};
 use crate::rt::Hold;
+
+/// Whether `raised` is a view a resource's kind does not have (a texture asked of a buffer, and
+/// so on): what a stale cached object answers for the object that reused its reference.
+pub(crate) fn is_wrong_kind(raised: &crate::raise::Raise) -> bool {
+    matches!(
+        raised_kind(raised),
+        Some(RaiseKind::Unrecognized(
+            Op::GetTexture | Op::GetHeap | Op::GetIcb | Op::GetBuffer | Op::GetResource
+        ))
+    )
+}
 
 /// One kind's cached objects, keyed by reference, in list order (the order they release in).
 pub struct Cache<T> {
@@ -277,16 +288,78 @@ impl<P: Platform> ResourceManager<P> {
     }
 
     /// One view of the resource for `reference`; the resource's handle drops after the view is
-    /// taken.
+    /// taken. A cached resource of the wrong kind for the view is first checked for staleness
+    /// ([`Self::refresh_stale_resource`]), and the view retried once on what replaces it.
     fn resource_view<T>(
         &self,
         hold: Hold<'_>,
         reference: u32,
-        view: impl FnOnce(&Resource<P>) -> RaiseResult<Option<T>>,
+        view: impl Fn(&Resource<P>) -> RaiseResult<Option<T>>,
     ) -> RaiseResult<Result<Option<T>, String>> {
-        match self.get_object::<Resources>(hold, reference)? {
-            Ok(resource) => Ok(Ok(resource.as_deref().map_or(Ok(None), view)?)),
-            Err(e) => Ok(Err(e)),
+        let resource = match self.get_object::<Resources>(hold, reference)? {
+            Ok(Some(resource)) => resource,
+            Ok(None) => return Ok(Ok(None)),
+            Err(e) => return Ok(Err(e)),
+        };
+        match view(&resource) {
+            Ok(v) => Ok(Ok(v)),
+            Err(raised) if is_wrong_kind(&raised) => {
+                match self.refresh_stale_resource(hold, reference, &resource)? {
+                    Some(fresh) => Ok(Ok(view(&fresh)?)),
+                    None => Err(raised),
+                }
+            }
+            Err(raised) => Err(raised),
+        }
+    }
+
+    /// What replaces `stale`, the resource looked up for `reference`, when the guest's object
+    /// list no longer describes it: the guest reused the reference for another kind of object
+    /// while the cache still held the old one. The entry is read again; when its type cannot make
+    /// `stale`'s kind, `stale` is dropped from the cache and the object made from the current
+    /// entry. `None` when the entry still agrees (or cannot be read), so the caller raises as it
+    /// would have.
+    pub fn refresh_stale_resource(
+        &self,
+        hold: Hold<'_>,
+        reference: u32,
+        stale: &Arc<Resource<P>>,
+    ) -> RaiseResult<Option<Arc<Resource<P>>>> {
+        let Some(types) = stale.created_from_object_types() else {
+            return Ok(None);
+        };
+        let _creation = self.creation.lock();
+        match self.probe::<Resources>(reference) {
+            // Already replaced on another thread.
+            Some(cached) if !Arc::ptr_eq(&cached, stale) => return Ok(Some(cached)),
+            _ => {}
+        }
+        let Ok(entry) = self.object_lists.get_object_entry_remapping(hold, reference) else {
+            return Ok(None);
+        };
+        let object_type = entry.object_type();
+        if object_type == 0 || types.contains(&object_type) {
+            return Ok(None);
+        }
+        log::warn!(
+            "object {reference}: cached {} is stale, the entry is now type {object_type}; \
+             recreating",
+            stale.kind_name()
+        );
+        let removed = self.with_caches(|c| {
+            let cache = Resources::sub_manager_mut(c);
+            match cache.get(reference) {
+                Some(cached) if Arc::ptr_eq(cached, stale) => cache.remove(reference),
+                _ => None,
+            }
+        });
+        drop(removed);
+        match self.new_object::<Resources>(hold, reference)? {
+            Ok(fresh) => Ok(fresh),
+            Err(e) => {
+                log::warn!("object {reference}: recreating the stale object failed: {e}");
+                Ok(None)
+            }
         }
     }
 
@@ -587,6 +660,91 @@ mod tests {
             );
             let hold = Hold::NONE;
             assert!(fx.m.get_object_heap(hold, 1).is_err());
+        }
+    }
+
+    mod stale_resources {
+        use super::*;
+        use crate::resources::resource::test_support::Env;
+
+        fn private_buffer(env: &Env) -> Arc<Resource<P>> {
+            env.run(|| {
+                crate::resources::buffer::private::PrivateBufferResource::new(
+                    env.task(),
+                    &[16, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+                    None,
+                )
+            })
+            .unwrap()
+            .unwrap()
+        }
+
+        fn cached(fx: &Fx, reference: u32) -> Option<Arc<Resource<P>>> {
+            fx.m.get_existing_object::<Resources>(reference).flatten()
+        }
+
+        /// A private buffer cached at a reference whose entry is now another type is dropped,
+        /// and the view still raises when the current entry makes nothing.
+        #[test]
+        fn a_buffer_under_a_reused_reference_is_dropped() {
+            let env = Env::new();
+            let fx = Fx::new(&entries3(), Placement::Off);
+            let stale = private_buffer(&env);
+            assert!(fx.m.register_object::<Resources>(1, Arc::clone(&stale)));
+            let e = fx.m.get_object_texture(Hold::NONE, 1).unwrap_err();
+            assert_eq!(
+                raised_kind(&e),
+                Some(RaiseKind::Unrecognized(Op::GetTexture))
+            );
+            assert!(cached(&fx, 1).is_none());
+        }
+
+        /// An entry that still makes the cached kind keeps it, and the raise stands.
+        #[test]
+        fn an_agreeing_entry_keeps_the_cached_object() {
+            let env = Env::new();
+            let fx = Fx::new(&[(0, 0, 0), (1, 0x10, REC)], Placement::Off);
+            let kept = private_buffer(&env);
+            assert!(fx.m.register_object::<Resources>(1, Arc::clone(&kept)));
+            assert!(fx.m.get_object_heap(Hold::NONE, 1).is_err());
+            assert!(Arc::ptr_eq(&cached(&fx, 1).unwrap(), &kept));
+        }
+
+        /// A kind more than one creator makes is never judged stale.
+        #[test]
+        fn a_texture_is_never_judged() {
+            let fx = Fx::new(&entries3(), Placement::Off);
+            let t = texture_resource(&fx);
+            assert!(fx.m.register_object::<Resources>(1, Arc::clone(&t)));
+            assert!(fx.m.get_object_heap(Hold::NONE, 1).is_err());
+            assert!(Arc::ptr_eq(&cached(&fx, 1).unwrap(), &t));
+        }
+
+        /// What another thread cached in the stale object's place is answered, untouched.
+        #[test]
+        fn a_replacement_already_cached_is_returned() {
+            let env = Env::new();
+            let fx = Fx::new(&entries3(), Placement::Off);
+            let stale = private_buffer(&env);
+            let fresh = texture_resource(&fx);
+            assert!(fx.m.register_object::<Resources>(1, Arc::clone(&fresh)));
+            let got = fx
+                .m
+                .refresh_stale_resource(Hold::NONE, 1, &stale)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&got, &fresh));
+            assert!(Arc::ptr_eq(&cached(&fx, 1).unwrap(), &fresh));
+        }
+
+        /// Only resource views of the wrong kind count.
+        #[test]
+        fn wrong_kind_raises() {
+            let env = Env::new();
+            let b = private_buffer(&env);
+            assert!(is_wrong_kind(&b.get_texture().unwrap_err()));
+            assert!(is_wrong_kind(&b.get_heap().unwrap_err()));
+            assert!(!is_wrong_kind(&b.prepare_with_cpu(Hold::NONE).unwrap_err()));
         }
     }
 

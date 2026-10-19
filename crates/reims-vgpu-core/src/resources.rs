@@ -245,8 +245,7 @@ pub(crate) fn raise_with<T>(kind: RaiseKind, detail: impl fmt::Display) -> Raise
     Err(Raise::new(kind).with_detail(detail))
 }
 
-/// The area's raise a `Raise` carries, if it carries one (tests).
-#[cfg(test)]
+/// The area's raise a `Raise` carries, if it carries one.
 pub(crate) fn raised_kind(t: &Raise) -> Option<RaiseKind> {
     match t.id() {
         crate::raise::RaiseId::Resources(k) => Some(k),

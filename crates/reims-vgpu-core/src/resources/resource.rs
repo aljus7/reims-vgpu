@@ -483,6 +483,22 @@ impl<P: Platform> Resource<P> {
         crate::resources::raise_with(RaiseKind::Unrecognized(op), self.kind_name())
     }
 
+    /// The object-list entry types that make this kind ([`create_resource`]), for the kinds only
+    /// one creator makes; `None` for the others, which are never judged stale.
+    ///
+    /// [`create_resource`]: crate::resources::manager::create::create_resource
+    pub fn created_from_object_types(&self) -> Option<&'static [u8]> {
+        match &self.kind {
+            ResourceKind::SharedBuffer(_)
+            | ResourceKind::PrivateBuffer(_)
+            | ResourceKind::DetachBuffer(_) => Some(&[1]),
+            ResourceKind::MapperRefBuffer(_) => Some(&[15]),
+            ResourceKind::LegacyHeap(_) | ResourceKind::DetachHeap(_) => Some(&[13]),
+            ResourceKind::Icb(_) => Some(&[20]),
+            _ => None,
+        }
+    }
+
     /// The kind's name (diagnostics).
     pub fn kind_name(&self) -> &'static str {
         match &self.kind {

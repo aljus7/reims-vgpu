@@ -101,6 +101,18 @@ pub(crate) trait CreateEnv<P: Platform> {
     fn res_get_texture(&self, r: &Self::Res) -> RaiseResult<Option<P::Texture>>;
     /// The resource's Metal heap.
     fn res_get_heap(&self, r: &Self::Res) -> RaiseResult<Option<P::Heap>>;
+    /// What replaces `stale`, looked up for `reference`, when the guest reused the reference
+    /// for another kind of object ([`ResourceManager::refresh_stale_resource`]); `None` keeps
+    /// the caller's raise.
+    fn refresh_stale(
+        &self,
+        hold: Hold<'_>,
+        reference: u32,
+        stale: &Self::Res,
+    ) -> RaiseResult<Option<Self::Res>> {
+        let _ = (hold, reference, stale);
+        Ok(None)
+    }
     /// A backing's IOSurface.
     fn res_io_surface(&self, r: &Self::Res) -> RaiseResult<Option<P::Surface>>;
     /// A child buffer of `r` over `buffer`.
@@ -235,6 +247,14 @@ impl<P: Platform> CreateEnv<P> for ResourceManager<P> {
     }
     fn res_get_heap(&self, r: &Self::Res) -> RaiseResult<Option<P::Heap>> {
         r.get_heap()
+    }
+    fn refresh_stale(
+        &self,
+        hold: Hold<'_>,
+        reference: u32,
+        stale: &Self::Res,
+    ) -> RaiseResult<Option<Self::Res>> {
+        ResourceManager::refresh_stale_resource(self, hold, reference, stale)
     }
     fn res_io_surface(&self, r: &Self::Res) -> RaiseResult<Option<P::Surface>> {
         match &r.kind {
@@ -543,6 +563,31 @@ impl<P: Platform> ResourceManager<P> {
     }
 }
 
+/// `view` of `res`, the resource looked up for `reference`. A view of the wrong kind first asks
+/// whether `res` is stale ([`CreateEnv::refresh_stale`]); the view is retried once on what
+/// replaces it, which is returned in its place.
+pub(crate) fn view_or_refresh<P: Platform, E: CreateEnv<P>, T>(
+    hold: Hold<'_>,
+    env: &E,
+    reference: u32,
+    res: E::Res,
+    view: impl Fn(&E::Res) -> RaiseResult<Option<T>>,
+) -> RaiseResult<(E::Res, Option<T>)> {
+    match view(&res) {
+        Ok(v) => Ok((res, v)),
+        Err(raised) if crate::resources::manager::cache::is_wrong_kind(&raised) => {
+            match env.refresh_stale(hold, reference, &res)? {
+                Some(fresh) => {
+                    let v = view(&fresh)?;
+                    Ok((fresh, v))
+                }
+                None => Err(raised),
+            }
+        }
+        Err(raised) => Err(raised),
+    }
+}
+
 /// Registers the new resource's buffer address when the task registers addresses; on a failed
 /// registration the resource is released and the error returned.
 ///
@@ -644,9 +689,12 @@ pub(crate) fn create_heap_buffer<P: Platform, E: CreateEnv<P>>(
             .map_err(|e| format!("no base heap at reference {heap_reference}: {e}"))
     );
     // Reference 0 is nil, and every send below answers nil.
-    let mtl_heap = match &heap {
-        Some(h) => env.res_get_heap(h)?,
-        None => None,
+    let (heap, mtl_heap) = match heap {
+        Some(h) => {
+            let (h, m) = view_or_refresh(hold, env, heap_reference, h, |h| env.res_get_heap(h))?;
+            (Some(h), m)
+        }
+        None => (None, None),
     };
     let options = mtl_heap
         .as_ref()
