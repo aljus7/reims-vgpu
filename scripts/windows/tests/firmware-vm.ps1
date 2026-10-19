@@ -11,6 +11,9 @@ $testScripts = Join-Path $testRoot 'scripts/windows'
 New-Item -ItemType Directory -Force -Path $testScripts | Out-Null
 Copy-Item -Path (Join-Path $sourceScripts '*.ps1') -Destination $testScripts
 Copy-Item -LiteralPath $EnvironmentScript -Destination (Join-Path $testScripts 'environment.ps1') -Force
+foreach ($entryPoint in @('New-VM.ps1','Set-VMCPU.ps1','Remove-VM.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $sourceScripts $entryPoint) -Destination $testRoot
+}
 $oldOverride = $env:REIMS_PROJECT_ROOT_OVERRIDE
 $env:REIMS_PROJECT_ROOT_OVERRIDE = $testRoot
 . (Join-Path $testScripts 'start.ps1') -FunctionsOnly
@@ -71,6 +74,28 @@ try {
     Assert-Throws { Get-ReimsVmConfig } 'VM input must belong'
     Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $config
     $command = Get-ReimsQemuArguments $config (Join-Path $testRoot 'vm/logs/test')
+    Assert-Condition ($command[$command.IndexOf('-smp') + 1] -eq '8,sockets=1,cores=8,threads=1') 'Legacy CPU configuration retains one socket and no SMT'
+    foreach ($cpus in @(1,2,3,4,6,8,12,16,32,64)) {
+        foreach ($threads in @(1,2)) {
+            $cpuConfig = $config.PSObject.Copy()
+            $cpuConfig.cpus = $cpus
+            $cpuConfig | Add-Member -Force cpu_threads $threads
+            if ($cpus % $threads) {
+                Assert-Throws { Get-ReimsQemuArguments $cpuConfig $testRoot } 'divisible'
+            } else {
+                $cpuArgs = Get-ReimsQemuArguments $cpuConfig $testRoot
+                Assert-Condition ($cpuArgs[$cpuArgs.IndexOf('-smp') + 1] -eq "$cpus,sockets=1,cores=$([int]($cpus/$threads)),threads=$threads") 'Selected vCPU count produces exact one-socket topology'
+            }
+        }
+    }
+    foreach ($invalid in @(-1,0,65,1.5,'eight',$null)) {
+        Assert-Throws { Get-ReimsCpuTopology ([pscustomobject]@{cpus=$invalid}) } 'CPU count must'
+    }
+    foreach ($invalid in @(0,3,1.5,$null)) {
+        Assert-Throws { Get-ReimsCpuTopology ([pscustomobject]@{cpus=8;cpu_threads=$invalid}) } 'Threads per core must'
+    }
+    Assert-Throws { & (Join-Path $testRoot 'New-VM.ps1') -Name InvalidSmt -Cpus 3 -ThreadsPerCore 2 } 'divisible'
+    Assert-Condition (!(Test-Path -LiteralPath (Join-Path $testRoot 'instances\InvalidSmt'))) 'Invalid creation topology is refused before any VM is created'
     Assert-Condition ($command[$command.IndexOf('-accel') + 1] -eq 'whpx,hyperv=off') 'WHPX uses QEMU clock-frequency leaves for macOS, without Hyper-V enlightenments'
     $tweaked = Get-ReimsQemuArguments $config $testRoot -WhpxTweaks
     Assert-Condition ($tweaked[$tweaked.IndexOf('-accel') + 1] -eq 'whpx,hyperv=off,exit-loop-budget-ms=5,pin-gpa=on,high-resolution-timer=on') 'Experimental WHPX options are explicit and keep the macOS CPU clock policy'
@@ -230,6 +255,18 @@ image[512:1024]=header; image[1024:1024+len(entries)]=entries
     & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetHardware -Cpus 4 -MemoryMiB 4096 -Resolution 2560x1440 -Audio dsound | Out-Null
     $hardware = Get-ReimsVmConfig
     Assert-Condition ($hardware.cpus -eq 4 -and $hardware.memory_mib -eq 4096 -and $hardware.audio -eq 'dsound' -and $hardware.resolution -eq '2560x1440') 'Hardware editor persists actual CPU, RAM, sound and resolution'
+    & (Join-Path $testRoot 'Set-VMCPU.ps1') -Cpus 4 -ThreadsPerCore 2 | Out-Null
+    $cpuSaved = Get-ReimsVmConfig
+    Assert-Condition ($cpuSaved.cpus -eq 4 -and $cpuSaved.cpu_threads -eq 2 -and $cpuSaved.memory_mib -eq 4096 -and $cpuSaved.active_disk -eq $hardware.active_disk -and $cpuSaved.cpu -eq $hardware.cpu) 'CPU editor persists topology without touching memory, disks or CPU model'
+    $beforeInvalid = Get-Content -Raw (Join-Path $testRoot 'vm/state/config.json')
+    Assert-Throws { & (Join-Path $testScripts 'Set-VMCPU.ps1') -Cpus 3 -ThreadsPerCore 2 } 'divisible'
+    Assert-Condition ((Get-Content -Raw (Join-Path $testRoot 'vm/state/config.json')) -eq $beforeInvalid) 'Invalid topology leaves configuration untouched'
+    & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetHardware -Cpus 4 -MemoryMiB 4096 | Out-Null
+    Assert-Condition ((Get-ReimsVmConfig).cpu_threads -eq 2) 'Older hardware clients preserve saved SMT setting'
+    & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetHardware -Cpus 4 -ThreadsPerCore 1 -MemoryMiB 4096 -Audio dsound -Resolution 2560x1440 | Out-Null
+    Assert-Condition ((Get-ReimsVmConfig).cpu_threads -eq 1) 'Hardware editor can explicitly disable SMT'
+    $listed = & (Join-Path $testScripts 'Get-VMList.ps1') | ConvertFrom-Json
+    Assert-Condition ($listed[0].cpu_cores -eq 4 -and $listed[0].cpu_threads -eq 1) 'Launcher list reports persisted topology'
     $status = & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action Status | ConvertFrom-Json
     Assert-Condition ($status.with_installer -is [bool] -and !$status.with_installer) 'Installer status is a JSON boolean, not a PowerShell switch object'
     & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetHardware -WithInstaller -Microphone | Out-Null
@@ -302,6 +339,36 @@ image[512:1024]=header; image[1024:1024+len(entries)]=entries
     Assert-Condition ($echo.events[0].data.down -eq $false -and $echo.events[0].data.key.data -eq 'ret') 'QMP CLI preserves nested input events and false values'
     Assert-Throws { & (Join-Path $testScripts 'qmp.ps1') -Command fixture-error } 'fixture failure'
     Assert-Throws { Assert-ReimsVmStopped } 'Stop this VM'
+    Assert-Throws { & (Join-Path $testScripts 'Set-VMCPU.ps1') -Cpus 4 -ThreadsPerCore 2 } 'Stop this VM'
+    $deleteRoot = Join-Path $testRoot 'instances\DeleteMe'
+    New-Item -ItemType Directory -Force (Split-Path $deleteRoot) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $testRoot 'vm') -Destination $deleteRoot -Recurse
+    $deleteConfig = $restored.PSObject.Copy()
+    foreach ($key in @('base_disk','active_disk','opencore','firmware_code','firmware_vars','rom')) {
+        $deleteConfig.$key = $deleteConfig.$key.Replace((Join-Path $testRoot 'vm'), $deleteRoot)
+    }
+    Write-ReimsJson (Join-Path $deleteRoot 'state\config.json') $deleteConfig
+    $deleteScript = Join-Path $testRoot 'Remove-VM.ps1'
+    Assert-Throws { & $deleteScript -VMName Default -Confirm:$false } 'Default VM cannot'
+    Assert-Throws { & $deleteScript -VMName '..' -Confirm:$false } 'pattern'
+    Assert-Throws { & $deleteScript -VMName DeleteMe -Confirm:$false } 'Stop this VM'
+    Remove-Item -LiteralPath (Join-Path $deleteRoot 'state\runtime.json')
+    & $deleteScript -VMName DeleteMe -WhatIf
+    Assert-Condition (Test-Path -LiteralPath $deleteRoot) 'WhatIf does not delete a VM'
+    $linkedFolder = Join-Path $deleteRoot 'linked'
+    New-Item -ItemType Junction -Path $linkedFolder -Target $firmwareDirectory | Out-Null
+    Assert-Throws { & $deleteScript -VMName DeleteMe -Confirm:$false } 'linked files or folders'
+    [IO.Directory]::Delete($linkedFolder)
+    $dependentDisk = Join-Path $diskDirectory 'dependent.qcow2'
+    Invoke-ReimsTool $QemuImg @('create','-f','qcow2','-F','qcow2','-b',$deleteConfig.active_disk,$dependentDisk) | Out-Null
+    $dependentConfig = $restored.PSObject.Copy()
+    $dependentConfig.active_disk = $dependentDisk
+    Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $dependentConfig
+    Assert-Throws { & $deleteScript -VMName DeleteMe -Confirm:$false } 'backing chain depends'
+    Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $restored
+    Remove-Item -LiteralPath $dependentDisk
+    & $deleteScript -VMName DeleteMe -Confirm:$false | Out-Null
+    Assert-Condition (!(Test-Path -LiteralPath $deleteRoot) -and (Test-Path -LiteralPath $restored.active_disk)) 'Deletion removes only the named VM and preserves Default'
     $wrong = $runtime.PSObject.Copy()
     $wrong.start_ticks++
     Assert-Throws { Get-ReimsVmProcess $wrong } 'belongs to another process'

@@ -15,6 +15,7 @@ param(
     [ValidatePattern('^[a-z_][a-z0-9_-]*$')][string]$User,
     [string]$GuestHost, [string]$Fingerprint,
     [ValidateRange(1,64)][int]$Cpus = 8,
+    [ValidateSet(1,2)][int]$ThreadsPerCore = 1,
     [ValidateRange(4096,131072)][int]$MemoryMiB = 8192,
     [ValidateRange(64,2048)][int]$DiskGiB = 128,
     [ValidateSet('none','dsound')][string]$Audio = 'none',
@@ -24,6 +25,7 @@ param(
 )
 $env:REIMS_PROJECT_ROOT_OVERRIDE = [IO.Path]::GetFullPath($Root)
 $env:REIMS_VM_ROOT_OVERRIDE = if ($VmDirectory) { [IO.Path]::GetFullPath($VmDirectory) } else { '' }
+$hasCpuThreads = $PSBoundParameters.ContainsKey('ThreadsPerCore')
 . "$PSScriptRoot/start.ps1" -FunctionsOnly
 
 function Get-GuestEndpoint($Config) {
@@ -127,6 +129,7 @@ if ($Action -eq 'Status') {
         microphone=[bool]($config -and $config.PSObject.Properties['microphone'] -and $config.microphone);
         usb_backend=$(if ($config -and $config.PSObject.Properties['usb_backend']) {$config.usb_backend} else {'winusb'});
         cpus=$(if ($config) {$config.cpus} else {8}); memory_mib=$(if ($config) {$config.memory_mib} else {8192});
+        cpu_threads=$(if ($config) {(Get-ReimsCpuTopology $config).threads} else {1});
         disk_gib=$(if ($config) {$config.disk_gib} else {128}); disk=$(if ($config) {$config.active_disk} else {''});
         audio=$(if ($config -and $config.PSObject.Properties['audio']) {$config.audio} else {'none'});
         with_installer=$installerAttached; network_adapter=$(if ($config -and $config.PSObject.Properties['network']) {$config.network.adapter} else {''});
@@ -271,6 +274,9 @@ print(json.dumps(dict(model=g['SystemProductName'],serial=g['SystemSerialNumber'
     }
     SetHardware {
         Assert-ReimsVmStopped
+        $config = Get-ReimsVmConfig
+        $threads = if ($hasCpuThreads) { $ThreadsPerCore } else { (Get-ReimsCpuTopology $config).threads }
+        $topology = Get-ReimsCpuTopology ([pscustomobject]@{cpus=$Cpus;cpu_threads=$threads})
         if ($MemoryMiB % 4 -ne 0) { throw 'メモリは 4 MiB 単位で指定してください。' }
         $hostInfo = Get-CimInstance Win32_ComputerSystem
         if ($Cpus -gt $hostInfo.NumberOfLogicalProcessors -or [long]$MemoryMiB * 1MB -ge $hostInfo.TotalPhysicalMemory) { throw 'ホストの CPU / メモリ容量以内で設定してください。' }
@@ -279,6 +285,7 @@ print(json.dumps(dict(model=g['SystemProductName'],serial=g['SystemSerialNumber'
         if ($Iso) { & "$PSScriptRoot/prepare-vm.ps1" -Iso $Iso | Out-Null }
         $config = Get-ReimsVmConfig
         $config.cpus = $Cpus; $config.memory_mib = $MemoryMiB; $config.resolution = $Resolution
+        $config | Add-Member -Force cpu_threads $topology.threads
         $config | Add-Member -Force audio $Audio
         $config | Add-Member -Force microphone ([bool]$Microphone)
         $config | Add-Member -Force usb_backend $UsbBackend

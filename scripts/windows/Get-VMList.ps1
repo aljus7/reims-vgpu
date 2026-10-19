@@ -1,6 +1,7 @@
 #Requires -Version 7.2
 # Prints every VM (the default one and instances\*) as a JSON array for the launcher app.
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\cpu.ps1"
 $ProjectRoot = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '.work\downloads')) {
     [IO.Path]::GetFullPath($PSScriptRoot)
 } else {
@@ -23,6 +24,7 @@ $result = foreach ($name in $roots.Keys) {
         $process = Get-Process -Id $runtime.pid -ErrorAction SilentlyContinue
         $running = $process -and $process.StartTime.ToUniversalTime().Ticks -eq [long]$runtime.start_ticks
     }
-    [pscustomobject]@{ name = $name; cpus = $config.cpus; memory_mib = $config.memory_mib; disk_gib = $config.disk_gib; running = [bool]$running }
+    $topology = Get-ReimsCpuTopology $config
+    [pscustomobject]@{ name = $name; cpus = $topology.cpus; cpu_cores = $topology.cores; cpu_threads = $topology.threads; memory_mib = $config.memory_mib; disk_gib = $config.disk_gib; running = [bool]$running }
 }
 ConvertTo-Json -InputObject @($result) -Compress

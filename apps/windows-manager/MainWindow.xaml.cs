@@ -98,6 +98,7 @@ public partial class MainWindow : Window
         if (latest.ValueKind != JsonValueKind.Object) return;
         MemorySlider.Value=Math.Clamp(latest.GetProperty("memory_mib").GetDouble()/1024,4,64); Memory.Text=latest.GetProperty("memory_mib").ToString();
         Cpus.Text=latest.GetProperty("cpus").ToString(); DiskSize.Text=latest.GetProperty("disk_gib").ToString();
+        CpuThreads.SelectedIndex=latest.GetProperty("cpu_threads").GetInt32()==2 ? 1 : 0;
         DiskInfo.Text=$"最大容量: {DiskSize.Text} GiB\n{latest.GetProperty("disk").GetString()}";
         Iso.Text=HardwareIsoPath.Text=latest.GetProperty("iso").GetString()??"";
         ConnectIso.IsChecked=HardwareIso.IsChecked=latest.GetProperty("with_installer").GetBoolean();
@@ -125,7 +126,7 @@ public partial class MainWindow : Window
     private async void RestoreSnapshot(object sender,RoutedEventArgs e) { if (Confirm("選択したスナップショットに切り替えます。現在のディスクも保持します。")) await Operate("SnapshotRestore",["-Name",Selected(Snapshots)]); }
     private async void ForceExit(object sender,RoutedEventArgs e) { if (Confirm("未保存の macOS 作業を失います。強制終了しますか？")) await Operate("ForceExit"); }
     private async void SaveHardware(object sender,RoutedEventArgs e) {
-        var args=new List<string> {"-Cpus",Cpus.Text,"-MemoryMiB",Memory.Text,"-Resolution",Selected(Resolution),"-Iso",HardwareIsoPath.Text,"-Network",Bridge.IsChecked==true?"bridge":"nat","-Adapter",Selected(Tap),"-GuestHost",GuestHost.Text,"-Audio",Sound.IsChecked==true?"dsound":"none"};
+        var args=new List<string> {"-Cpus",Cpus.Text,"-ThreadsPerCore",CpuThreads.SelectedIndex==1?"2":"1","-MemoryMiB",Memory.Text,"-Resolution",Selected(Resolution),"-Iso",HardwareIsoPath.Text,"-Network",Bridge.IsChecked==true?"bridge":"nat","-Adapter",Selected(Tap),"-GuestHost",GuestHost.Text,"-Audio",Sound.IsChecked==true?"dsound":"none"};
         if (Microphone.IsChecked==true) args.Add("-Microphone");
         args.AddRange(["-UsbBackend",UsbBackend.SelectedIndex==1?"usbdk":"winusb"]);
         if (HardwareIso.IsChecked==true) args.Add("-WithInstaller");

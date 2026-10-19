@@ -191,7 +191,9 @@ Run commands from the repository root unless noted.
 | `prepare-vm.ps1 -Iso <path>` | Validates recovery/installer media and creates or updates VM configuration and blank disks. |
 | `start.ps1 [-DryRun] [-WithoutInstaller]` | Starts the default source-tree VM; `-DryRun` prints the launch plan without starting QEMU. |
 | `stop.ps1` | Requests a guest shutdown through the local QMP control endpoint. |
-| `New-VM.ps1 -Name <name> [-DiskGiB <size>] [-Cpus <n>] [-MemoryMiB <mib>]` | Creates an independent named VM with a blank disk and fresh VM identity. |
+| `New-VM.ps1 -Name <name> [-DiskGiB <size>] [-Cpus <n>] [-ThreadsPerCore <1 or 2>] [-MemoryMiB <mib>]` | Creates an independent named VM with a blank disk and fresh VM identity. CPU count is total vCPUs; one socket, cores derived from threads per core. |
+| `Set-VMCPU.ps1 [-VMName <name>] -Cpus <n> [-ThreadsPerCore <1 or 2>]` | Saves CPU topology for a fully stopped VM without changing disks, RAM or identity. Defaults to one thread per core. |
+| `Remove-VM.ps1 -VMName <name> [-WhatIf]` | Permanently deletes a stopped named VM after confirmation. Protects Default, rejects links and known default/named VM dependencies. |
 | `Start-VM.ps1 [-VMName <name>]` | Starts the default or named VM using the portable-script wrapper. |
 | `Stop-VM.ps1 [-VMName <name>] [-Exit]` | Requests shutdown; `-Exit` also closes QEMU after guest shutdown. |
 | `Export-Runtime.ps1 [-Destination <path>]` | Builds a separate runtime-only folder; refuses to overwrite a destination. |

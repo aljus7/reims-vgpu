@@ -58,18 +58,63 @@ folder). The app finds the project by
 looking upward from its own folder for `scripts\windows\New-VM.ps1`, so it will
 not work if moved outside. It needs PowerShell 7 (`pwsh`) on the PATH.
 
-- **New virtual machine:** name, CPU cores, memory and disk size. Graphics
+- **New virtual machine:** name, total vCPUs, threads per core, memory and disk size. Graphics
   acceleration is always on. It runs `New-VM.ps1`, which creates
   `instances\<name>\` with a fresh blank disk and its own identity, and builds
   the `REIMSTOOLS` disk with the guest scripts. `New-VM.ps1` needs the default VM
   prepared once first (`prepare-opencore.ps1`, `prepare-vm.ps1`).
 - **Start / Shut down** the selected VM. Tick *Installer already used* once
   macOS is installed. The list refreshes every 5 seconds.
+- **Apply CPU:** change the selected VM's total vCPUs and threads per core
+  while it is stopped. If macOS is off but QEMU is still retained, run
+  `Stop-VM.ps1 -VMName <name> -Exit` first.
+- **Delete:** permanently remove a stopped, named VM after confirmation,
+  including disks and snapshots in its `instances\<name>` folder.
+  **Default cannot be deleted.** Linked folders and dependencies from other
+  default/named VMs are refused. Fully exit QEMU first; guest shutdown alone
+  may leave its process running. Files outside that VM folder are not deleted.
+- **Dark mode:** switch the launcher's controls, VM list and log between
+  dark and light palettes. This changes only the launcher, not macOS.
 - You still follow sections 3 to 5 inside the VM (install macOS, then run the
   two guest scripts).
 
 The app is only a front end for `New-VM.ps1`, `Start-VM.ps1`, `Stop-VM.ps1` and
-`Get-VMList.ps1`; the log pane shows their output.
+`Get-VMList.ps1`, `Set-VMCPU.ps1` and `Remove-VM.ps1`; the log pane shows their output.
+
+### CPU topology
+
+The VM always has **one socket**. The CPU count means total virtual processors,
+not host physical cores. By default, 8 vCPUs are 8 cores with 1 thread each,
+exactly as before. Selecting 2 threads per core exposes SMT: 8 vCPUs become
+4 cores with 2 threads each, **not** 16 vCPUs. SMT requires an even count.
+The launcher shows the derived topology; the manager's processor page also
+offers the threads-per-core setting.
+
+From a source checkout:
+
+```powershell
+.\scripts\windows\New-VM.ps1 -Name test -Cpus 8 -ThreadsPerCore 2
+# Fully exit the selected VM before editing its saved CPU settings:
+.\scripts\windows\Stop-VM.ps1 -VMName test -Exit
+.\scripts\windows\Set-VMCPU.ps1 -VMName test -Cpus 8 -ThreadsPerCore 2
+.\scripts\windows\Start-VM.ps1 -VMName test -WithoutInstaller
+# Return to the previous topology:
+.\scripts\windows\Set-VMCPU.ps1 -VMName Default -Cpus 8 -ThreadsPerCore 1
+```
+
+In an exported runtime, these commands are at the install folder root.
+Existing configs without `cpu_threads` retain 1 thread per core. Invalid
+combinations are rejected rather than rounded or silently adjusted. CPU
+topology is guest-visible scheduling information, not host-core affinity:
+it does not bind vCPUs to physical cores or guarantee faster operation.
+Leave host CPU capacity free and compare the same workload before adopting SMT.
+
+To delete a named VM from a source checkout, use
+`.\scripts\windows\Remove-VM.ps1 -VMName test`. It asks for confirmation;
+`-WhatIf` previews the target without deleting it. The exported runtime puts
+this script at its root. Only VMs in this project's `instances` folder are
+eligible; imported VMs outside that folder must be managed separately.
+
 ## 3. Install macOS
 
 1. `prepare-vm.ps1 -Iso <your Recovery or installer image>` validates the image

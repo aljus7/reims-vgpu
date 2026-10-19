@@ -160,7 +160,7 @@ try {
     }
 
     $operationalScripts = @(
-        'environment.ps1','usb.ps1','prepare-opencore.ps1','prepare-vm.ps1',
+        'environment.ps1','usb.ps1','cpu.ps1','prepare-opencore.ps1','prepare-vm.ps1',
         'start.ps1','stop.ps1','qmp.ps1','prepare-tools.ps1','Get-VMList.ps1',
         'guest-setup.command','guest-1-recovery-setup.sh','guest-2-macos-optimize.sh'
     )
@@ -181,7 +181,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $ProjectRoot "docs\$doc") -Destination $docsOut
     }
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE') -Destination $partial
-    foreach ($name in @('New-VM.ps1','Start-VM.ps1','Stop-VM.ps1','Relocate-VM.ps1')) {
+    foreach ($name in @('New-VM.ps1','Start-VM.ps1','Stop-VM.ps1','Set-VMCPU.ps1','Remove-VM.ps1','Relocate-VM.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $partial
     }
     $ocTemplate = Join-Path $partial 'vm\firmware\opencore-1.0.8\root'

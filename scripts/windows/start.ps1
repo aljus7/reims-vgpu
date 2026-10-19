@@ -12,6 +12,7 @@ param(
 )
 . "$PSScriptRoot/environment.ps1"
 . "$PSScriptRoot/usb.ps1"
+. "$PSScriptRoot/cpu.ps1"
 
 function Get-ReimsSshKnownHostsOption([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or $Path -match '["\r\n\x00]') { throw 'Invalid SSH known-hosts path.' }
@@ -167,6 +168,7 @@ function Get-ReimsWhpxStatus {
 
 function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused, [switch]$Headless,
     [switch]$WithoutInstaller, [switch]$DiagnosticTcg, [switch]$WhpxTweaks) {
+    $topology = Get-ReimsCpuTopology $Config
     if ($WhpxTweaks -and $DiagnosticTcg) { throw 'WHPX tweaks cannot be used with TCG.' }
     $accelerator = if ($DiagnosticTcg) { 'tcg' } elseif ($WhpxTweaks) {
         'whpx,hyperv=off,exit-loop-budget-ms=5,pin-gpa=on,high-resolution-timer=on'
@@ -187,7 +189,7 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
     $qemuArguments = @(
         '-L', (ConvertTo-ReimsQemuPath (Join-Path $ProjectRoot 'vendor/qemu/pc-bios')),
         '-name', 'reims-windows', '-machine', 'q35', '-accel', $accelerator,
-        '-cpu', $(if ($DiagnosticTcg) { 'max,vendor=GenuineIntel' } else { $Config.cpu }), '-smp', "$($Config.cpus),sockets=1,cores=$($Config.cpus),threads=1", '-m', "$($Config.memory_mib)M",
+        '-cpu', $(if ($DiagnosticTcg) { 'max,vendor=GenuineIntel' } else { $Config.cpu }), '-smp', $topology.argument, '-m', "$($Config.memory_mib)M",
         '-global', 'ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off',
         '-global', 'ICH9-LPC.disable_s3=1', '-global', 'ICH9-LPC.disable_s4=1',
         '-device', 'pcie-root-port,bus=pcie.0,addr=0x1,slot=1,x-speed=16,x-width=32',

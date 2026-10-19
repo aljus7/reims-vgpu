@@ -4,10 +4,15 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$')][string]$Name,
     [ValidateRange(64,2048)][int]$DiskGiB = 128,
     [ValidateRange(1,64)][int]$Cpus = 8,
+    [ValidateSet(1,2)][int]$ThreadsPerCore = 1,
     [ValidateRange(4096,131072)][int]$MemoryMiB = 8192,
     [switch]$Start
 )
 $ErrorActionPreference = 'Stop'
+$cpuScript = Join-Path $PSScriptRoot 'cpu.ps1'
+if (!(Test-Path -LiteralPath $cpuScript)) { $cpuScript = Join-Path $PSScriptRoot 'scripts\windows\cpu.ps1' }
+. $cpuScript
+$topology = Get-ReimsCpuTopology ([pscustomobject]@{cpus=$Cpus;cpu_threads=$ThreadsPerCore})
 $ProjectRoot = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '.work\downloads')) {
     [IO.Path]::GetFullPath($PSScriptRoot)
 } else {
@@ -95,13 +100,14 @@ p.write_bytes(plistlib.dumps(c, sort_keys=False))
     $vmConfigPath = Join-Path $instanceRoot 'state\config.json'
     $vmConfig = Get-Content -Raw -LiteralPath $vmConfigPath | ConvertFrom-Json
     $vmConfig.cpus = $Cpus
+    $vmConfig | Add-Member -Force cpu_threads $ThreadsPerCore
     $vmConfig.memory_mib = $MemoryMiB
     [IO.File]::WriteAllText($vmConfigPath, ($vmConfig | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
     & $pwsh -NoProfile -ExecutionPolicy Bypass -File $opencore -Version 1.0.8 -FirmwareDirectory $firmwareDirectory -GenerateIdentity -Rebuild
     if ($LASTEXITCODE -ne 0) { throw 'Unique OpenCore identity generation failed.' }
     & $pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'prepare-tools.ps1')
     if ($LASTEXITCODE -ne 0) { Write-Warning 'Could not build the REIMSTOOLS disk; the guest scripts will not be attached.' }
-    "Created '$Name': $Cpus CPUs, $MemoryMiB MiB RAM, blank $DiskGiB GiB virtual disk. The source VM disk was not copied."
+    "Created '$Name': $Cpus vCPUs (1 socket, $($topology.cores) cores, $ThreadsPerCore threads/core), $MemoryMiB MiB RAM, blank $DiskGiB GiB virtual disk. The source VM disk was not copied."
     if ($Start) {
         & (Join-Path $ProjectRoot 'Start-VM.ps1') -VMName $Name
         if ($LASTEXITCODE -ne 0) { throw 'VM creation succeeded but starting it failed.' }

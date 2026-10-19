@@ -1,13 +1,13 @@
 <Window x:Class="ReimsLauncher.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Reims macOS VM Launcher" Width="820" Height="600" MinWidth="720" MinHeight="520"
-        WindowStartupLocation="CenterScreen">
+        Title="Reims macOS VM Launcher" Width="1000" Height="820" MinWidth="960" MinHeight="740"
+        WindowStartupLocation="CenterScreen" Background="{DynamicResource ApplicationBackgroundBrush}">
     <Grid Margin="16">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="16" />
-            <ColumnDefinition Width="290" />
+            <ColumnDefinition Width="320" />
         </Grid.ColumnDefinitions>
         <Grid.RowDefinitions>
             <RowDefinition Height="*" />
@@ -18,20 +18,32 @@
         <GroupBox Header="Virtual machines" Grid.Row="0" Grid.Column="0" Padding="8">
             <DockPanel>
                 <StackPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                    <CheckBox x:Name="DarkMode" Content="Dark mode" Checked="Theme_Changed" Unchecked="Theme_Changed" Margin="0,0,0,8" />
+                    <TextBlock Text="Selected VM: total vCPUs / threads per core (VM must be stopped)" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,8">
+                        <TextBox x:Name="SelectedCpus" Width="45" />
+                        <ComboBox x:Name="SelectedThreads" SelectedIndex="0" Width="140" Margin="8,0">
+                            <ComboBoxItem Content="1 thread/core" />
+                            <ComboBoxItem Content="2 threads/core" />
+                        </ComboBox>
+                        <Button x:Name="ApplyCpuButton" Content="Apply CPU" Click="ApplyCpu_Click" />
+                    </StackPanel>
                     <CheckBox x:Name="WithoutInstaller" Content="Installer already used (boot installed macOS)" Margin="0,0,0,8" />
                     <StackPanel Orientation="Horizontal">
                         <Button x:Name="StartButton" Content="Start" Width="90" Margin="0,0,8,0" Click="Start_Click" />
                         <Button x:Name="StopButton" Content="Shut down" Width="90" Margin="0,0,8,0" Click="Stop_Click" />
                         <Button Content="Refresh" Width="80" Click="Refresh_Click" />
+                        <Button x:Name="DeleteButton" Content="Delete..." Margin="8,0,0,0" Click="Delete_Click" />
                     </StackPanel>
                 </StackPanel>
                 <ListView x:Name="VmList" SelectionMode="Single" SelectionChanged="VmList_SelectionChanged">
                     <ListView.View>
                         <GridView>
-                            <GridViewColumn Header="Name" Width="130" DisplayMemberBinding="{Binding Name}" />
-                            <GridViewColumn Header="CPUs" Width="50" DisplayMemberBinding="{Binding Cpus}" />
+                            <GridViewColumn Header="Name" Width="110" DisplayMemberBinding="{Binding Name}" />
+                            <GridViewColumn Header="CPUs" Width="65" DisplayMemberBinding="{Binding Cpus}" />
+                            <GridViewColumn Header="Cores × threads" Width="120" DisplayMemberBinding="{Binding Topology}" />
                             <GridViewColumn Header="RAM" Width="70" DisplayMemberBinding="{Binding Ram}" />
-                            <GridViewColumn Header="Disk" Width="70" DisplayMemberBinding="{Binding Disk}" />
+                            <GridViewColumn Header="Disk" Width="80" DisplayMemberBinding="{Binding Disk}" />
                             <GridViewColumn Header="State" Width="80" DisplayMemberBinding="{Binding State}" />
                         </GridView>
                     </ListView.View>
@@ -40,15 +52,20 @@
         </GroupBox>
 
         <GroupBox Header="New virtual machine" Grid.Row="0" Grid.Column="2" Padding="8">
-            <StackPanel>
+            <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel>
                 <TextBlock Text="Name" />
                 <TextBox x:Name="NameBox" Margin="0,2,0,10" MaxLength="32" />
 
-                <TextBlock Text="CPU cores" />
+                <TextBlock Text="Total virtual CPUs (vCPUs)" />
                 <DockPanel Margin="0,2,0,10">
                     <TextBlock x:Name="CoresLabel" DockPanel.Dock="Right" Width="30" TextAlignment="Right" />
                     <Slider x:Name="CoresSlider" Minimum="1" Maximum="8" Value="8" IsSnapToTickEnabled="True" TickFrequency="1" ValueChanged="Slider_ValueChanged" />
                 </DockPanel>
+                <ComboBox x:Name="ThreadsCombo" SelectedIndex="0" SelectionChanged="Threads_SelectionChanged" Margin="0,0,0,4">
+                    <ComboBoxItem Content="1 thread per core (default)" />
+                    <ComboBoxItem Content="2 threads per core (SMT)" />
+                </ComboBox>
+                <TextBlock x:Name="TopologyLabel" TextWrapping="Wrap" Margin="0,0,0,10" />
 
                 <TextBlock Text="Memory (GiB)" />
                 <DockPanel Margin="0,2,0,10">
@@ -63,10 +80,10 @@
                 <TextBlock x:Name="ImageStatus" TextWrapping="Wrap" Margin="0,2,0,4" />
                 <Button x:Name="BrowseButton" Content="Browse..." Margin="0,0,0,10" Click="Browse_Click" />
 
-                <TextBlock TextWrapping="Wrap" Foreground="Gray" Margin="0,0,0,10"
+                <TextBlock TextWrapping="Wrap" Opacity="0.75" Margin="0,0,0,10"
                            Text="Graphics acceleration (Vulkan vGPU) is always on. The disk is sparse and grows as macOS uses it." />
                 <Button x:Name="CreateButton" Content="Create VM" Height="30" Click="Create_Click" />
-            </StackPanel>
+            </StackPanel></ScrollViewer>
         </GroupBox>
 
         <GroupBox Header="Log" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Padding="4">
