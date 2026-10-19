@@ -346,7 +346,7 @@ impl<P: Platform> ResourceManager<P> {
     ) -> RaiseResult<Result<WritableCursor, String>> {
         let _creation = self.creation.lock();
         // Reference 0 reads entry 0
-        let entry = match self.get_object_entry(buffer_reference) {
+        let entry = match self.object_lists.get_object_entry_remapping(hold, buffer_reference) {
             Ok(entry) => entry,
             Err(e) => return Ok(Err(e)),
         };

@@ -304,7 +304,7 @@ impl<P: Platform> ResourceManager<P> {
         if let Some(object) = self.probe::<K>(reference) {
             return Ok(Ok(Some(object)));
         }
-        let entry = match self.object_lists.get_object_entry(reference) {
+        let entry = match self.object_lists.get_object_entry_remapping(hold, reference) {
             Ok(entry) => entry,
             Err(e) => return Ok(Err(e)),
         };
@@ -607,7 +607,8 @@ mod tests {
             let mark = fx.clear_log();
             let r = fx.m.new_object::<TestKind>(Hold::NONE, 0).unwrap();
             assert_eq!(r.err().unwrap(), "object 0 has an empty entry");
-            assert!(fx.sels_since(mark).is_empty());
+            // Only the empty entry's remap of the object list: no cursor
+            assert_eq!(fx.sels_since(mark), ["new_virtual_mapping"]);
         }
 
         #[test]

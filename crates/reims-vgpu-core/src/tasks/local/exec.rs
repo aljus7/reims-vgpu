@@ -453,9 +453,10 @@ impl<P: Platform> LocalTask<P> {
             // A raise after `complete_resources` committed its buffer reports 2 here, and that
             // buffer's handler reports again later.
             log::warn!(
-                "task {}: exec faulted: {}",
+                "task {}: exec faulted: {} ({})",
                 self.task_id,
-                raised.exception()
+                raised.exception(),
+                raised.id()
             );
             done(ExecStatus::FAIL, None);
             hold.land(raised);

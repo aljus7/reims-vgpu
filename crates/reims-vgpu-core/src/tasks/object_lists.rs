@@ -286,6 +286,59 @@ impl<P: Platform> ObjectLists<P> {
         Err("the object list is not mapped".to_owned())
     }
 
+    /// The object-list entry at `index`, as [`ObjectLists::get_object_entry`], except that an
+    /// empty entry in a memory-map list is read once more through a fresh mapping of the list.
+    ///
+    /// The list's mapping is a snapshot of the guest page table at map time. A guest that moves
+    /// the list's pages to other physical memory without an unmap leaves that snapshot showing
+    /// the old pages, where the entry reads as empty: the remap walks the page table again.
+    pub fn get_object_entry_remapping(
+        &self,
+        hold: Hold<'_>,
+        index: u32,
+    ) -> Result<ObjectEntry, String> {
+        let entry = self.get_object_entry(index)?;
+        if entry.object_type() != 0 || self.st().is_legacy() {
+            return Ok(entry);
+        }
+        if !self.remap_object_list(hold) {
+            return Ok(entry);
+        }
+        let fresh = self.get_object_entry(index)?;
+        if fresh.object_type() != 0 {
+            log::warn!("object {index} found after remapping the object list");
+        }
+        Ok(fresh)
+    }
+
+    /// Replaces the memory-map object list's mapping with a fresh one, made before the old one
+    /// is released; answers whether a fresh mapping was taken. The legacy kind is left as it is.
+    pub fn remap_object_list(&self, hold: Hold<'_>) -> bool {
+        let _lock = self.mutex.lock();
+        let st = self.st();
+        if st.is_legacy() || st.objects.address.is_null() {
+            return false;
+        }
+        let (offset, length) = (st.objects.offset, st.objects.mapped_length);
+        drop(st);
+        let Some(mapping) = self.new_mapping(hold, false, offset, length, false) else {
+            return false;
+        };
+        let mut st = self.st();
+        // A concurrent `set_object_list` or unmap moved or dropped the list meanwhile
+        if st.objects.address.is_null()
+            || (st.objects.offset, st.objects.mapped_length) != (offset, length)
+        {
+            drop(st);
+            drop(mapping);
+            return false;
+        }
+        let (previous, mapped) = st.objects.adopt(Some(mapping));
+        drop(st);
+        drop(previous);
+        mapped
+    }
+
     /// Where the placement entry at `index` is; `Ok(None)` when there is no placement list to
     /// map.
     pub fn get_placement_list_entry(&self, index: u32) -> Result<Option<GuestPtr>, String> {
@@ -1418,6 +1471,76 @@ mod tests {
             assert!(!m.map_object_list(Hold::NONE));
             assert!(!m.is_object_list_mapped());
             assert!(m.st().objects.mapping.is_none());
+        }
+    }
+
+    mod remapping_lookup {
+        use super::*;
+
+        /// Entry 1 written in `mem` at `off`: type 7, length 0x20.
+        fn write_entry_1(f: &Fx, off: u64) {
+            assert!(f.mem.write(off + 12, &(7u32 | (0x20 << 8)).to_le_bytes()));
+        }
+
+        /// An empty entry reads again through a fresh mapping, which the list keeps
+        #[test]
+        fn empty_entry_found_after_remap() {
+            let f = fx();
+            let m = f.mgr(ObjectListKind::MemoryMap, false);
+            assert!(m.set_object_list(Hold::NONE, 0x4000, 24, 0, 0, f.root()));
+            f.next_mapping(Some(f.mapping(0, PAGE)));
+            assert!(m.map_object_list(Hold::NONE));
+            write_entry_1(&f, PAGE);
+            f.next_mapping(Some(f.mapping(PAGE, PAGE)));
+            let entry = m.get_object_entry_remapping(Hold::NONE, 1).unwrap();
+            assert_eq!((entry.object_type(), entry.length()), (7, 0x20));
+            assert_eq!(f.host_calls()[1].args, nvm(0x4000, PAGE, false));
+            assert_eq!(
+                m.st().objects.address.addr(),
+                f.mem.addr().wrapping_add(PAGE)
+            );
+        }
+
+        /// A filled entry makes no new mapping
+        #[test]
+        fn filled_entry_no_remap() {
+            let f = fx();
+            let m = f.mgr(ObjectListKind::MemoryMap, false);
+            assert!(m.set_object_list(Hold::NONE, 0x4000, 24, 0, 0, f.root()));
+            write_entry_1(&f, 0);
+            f.next_mapping(Some(f.mapping(0, PAGE)));
+            assert!(m.map_object_list(Hold::NONE));
+            let entry = m.get_object_entry_remapping(Hold::NONE, 1).unwrap();
+            assert_eq!(entry.object_type(), 7);
+            assert_eq!(f.host_calls().len(), 1);
+        }
+
+        /// A failed remap keeps the old mapping and answers the empty entry
+        #[test]
+        fn failed_remap_keeps_mapping() {
+            let f = fx();
+            let m = f.mgr(ObjectListKind::MemoryMap, false);
+            assert!(m.set_object_list(Hold::NONE, 0x4000, 24, 0, 0, f.root()));
+            f.next_mapping(Some(f.mapping(0, PAGE)));
+            assert!(m.map_object_list(Hold::NONE));
+            f.next_mapping(None);
+            let entry = m.get_object_entry_remapping(Hold::NONE, 1).unwrap();
+            assert_eq!(entry.object_type(), 0);
+            assert_eq!(m.st().objects.address.addr(), f.mem.addr());
+        }
+
+        /// The legacy kind never remaps
+        #[test]
+        fn legacy_no_remap() {
+            let f = fx();
+            let m = f.mgr(LEGACY(), false);
+            assert!(m.set_object_list(Hold::NONE, 0x4000, 24, 0, 0, f.root()));
+            f.p.script()
+                .push("mapped_address_for_offset", Step::value(f.mem.addr()));
+            assert!(m.map_object_list(Hold::NONE));
+            let entry = m.get_object_entry_remapping(Hold::NONE, 1).unwrap();
+            assert_eq!(entry.object_type(), 0);
+            assert_eq!(f.host_calls().len(), 1);
         }
     }
 

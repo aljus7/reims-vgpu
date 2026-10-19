@@ -274,3 +274,38 @@ The guest shut down through its own shutdown command before QEMU exited;
 the installed source disk's full SHA256 remained unchanged. ACPI powerdown
 alone had exceeded a 120-second deadline and was not treated as proof of a
 GPU hang. The release archive was left unchanged.
+
+## Long freezes: guest GPU resets after Reims exec faults (2026-10-19)
+
+The longest freezes coincide with guest `.gpuRestart` reports. Each follows
+a burst of `task N: exec faulted: ... object N has an empty entry` (or a
+failed render pipeline lookup) in the Reims log; the guest then resets the
+GPU and resumes the FIFO. The faults predate the remap batching and
+coalesced deallocate changes.
+
+The memory-map object list is a host mapping made from a walk of the guest
+page table at map time; it is replaced only by `set_object_list` or an unmap
+overlapping the list. If the guest moves the list's pages to other physical
+memory without that unmap, the host keeps reading the old pages, where an
+entry reads as empty. This is the leading hypothesis, not a proven cause.
+
+Mitigation (`ObjectLists::get_object_entry_remapping`): an empty entry is
+read once more through a fresh mapping of the list, made before the old one
+is released. When that finds the entry, Reims logs
+`object N found after remapping the object list`; seeing that line proves
+the stale-snapshot path. A still-empty entry faults as before.
+
+First soak with the mitigation (35 min, logged-in session, 152 app opens of
+Maps, Photos, Music, Calendar, Safari, Notes, System Settings, Freeform, with
+`REIMS_DEBUG=1`): no empty-entry fault, so the remap path was not exercised.
+One guest GPU reset (Maps) followed a 7.3 s frame gap and a different fault,
+`exec faulted: private buffer`: an operation a private buffer does not
+answer (`Unrecognized`). The exec fault line now also prints the raise's
+identity, which names that operation. An earlier 25 min soak without
+`REIMS_DEBUG` also logged a Maps GPU reset, but Reims logs nothing without
+it, so no fault count from such a run means anything.
+
+Still needed to call it fixed: multi-hour soaks with `REIMS_DEBUG=1`
+counting `exec faulted`, the remap line and new guest `.gpuRestart` reports
+against the old DLL. Rare AHCI command timeouts (30 s+ hangs) are a separate
+mechanism.
