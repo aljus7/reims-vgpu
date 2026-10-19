@@ -162,7 +162,8 @@ try {
     $operationalScripts = @(
         'environment.ps1','usb.ps1','cpu.ps1','prepare-opencore.ps1','prepare-vm.ps1',
         'start.ps1','stop.ps1','qmp.ps1','prepare-tools.ps1','Get-VMList.ps1',
-        'guest-setup.command','guest-1-recovery-setup.sh','guest-2-macos-optimize.sh'
+        'guest-setup.command','guest-1-recovery-setup.sh','guest-2-macos-optimize.sh',
+        'guest-diagnose-stutter.sh'
     )
     foreach ($name in $operationalScripts) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $partial 'scripts\windows')

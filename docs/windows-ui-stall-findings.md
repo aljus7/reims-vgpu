@@ -60,7 +60,7 @@ Temporary env-gated timestamps (removed) on doorbell writes (0x1020), stamp-inte
 - Texture releases (`MTLIOAccelTexture dealloc` -> `IOConnectCallMethod`) block a WindowServer worker for ~1% of samples; `setPurgeableState` calls for ~0.5%.
 - Dock: every thread idle (`__workq_kernreturn`, `mach_msg`, `psynch_cvwait`); no CPU work.
 
-So neither the compositor nor the client computes or blocks on the vGPU for long. The 250 ms to multi-second gaps between a stamp acknowledgement and the next doorbell are a wait for an event nobody is producing (likely a display-link / vsync-style tick or a frame-completion notification the guest expects from the device). Next lead: check which display events the device sends (`new_frame` callback, display interrupt bit, present-complete) against what the guest's `AppleParavirtGPU` driver waits for.
+These samples show little compositor/client CPU work during the sampled intervals. They do not identify the event behind the gaps or prove a missing device notification. Next lead: correlate the guest's wait with the shared display page, enabled interrupt bits and present-completion callback; the device implements conditional present interrupts (see the correction below).
 
 
 ## Cold app launch: Weather (measured)
@@ -105,18 +105,18 @@ Over two 90-110 s runs with a single vsynctester tab and nothing else touched: 6
 
 ### vCPU speed and guest timer stalls
 
-Same perl loop (30M iterations): guest 2.17 s vs host 1.73 s, so a vCPU runs at ~80% of native speed (WHPX overhead is small for pure compute). A 20 s guest timer test (7595 x 2 ms sleeps, vsynctester running): median overshoot 0.54 ms, p99 1.3 ms, max 12 ms, none over 50 ms. So the guest scheduler/vCPUs do not stall; the 0.25-5 s stalls seen in rendering are not CPU starvation or vCPU descheduling. They happen on the app/WindowServer<->GPU-driver wait path (or in cold-start single-thread work).
+Same perl loop (30M iterations): guest 2.17 s vs host 1.73 s, so a vCPU runs at ~80% of native speed for that workload. A 20 s guest timer test (7595 x 2 ms sleeps, vsynctester running): median overshoot 0.54 ms, p99 1.3 ms, max 12 ms, none over 50 ms. This short sample found no long timer stalls; it cannot exclude rare host/vCPU scheduling delays, nor locate a rendering wait in another interval.
 
 ### Register/command trace of the stalls (REIMS_REGTRACE, instrumentation reverted)
 
 Traced every register write, the interrupt-register reads and every FIFO command (with the time of commands over 3 ms) for 364 s of Mission Control and desktop animation. Opcodes below are hex (0x37 = ExecIndirect2, 0x25 = DeleteResource, 0x22 = UnmapMemory).
 
 - **Host command time is small.** Commands over 3 ms: 404 ExecIndirect2 (4.5 s total, 4 over 100 ms, max 275 ms), 50 DeleteResource (0.8 s), the rest under 0.3 s. About 6 s of 364 s, so host command execution does not explain the 0.25-5 s stalls.
-- **The display interrupt is never raised during animation.** Register 0x5 read 26,824 times and was always 0, as was the fault register 0xb. The device only raises display interrupts for connect, update and disconnect (`state_machine`), and the display doorbell (0x88) only carries cursor show/move and the live-resize latch. So the device gives the guest no vsync or frame-complete signal at all; pacing is guest-internal.
+- **The device-wide display register was zero in this trace.** Register 0x5 read 26,824 times and was always 0, as was the fault register 0xb. This does not inspect the shared display page's present-completion bits and is not evidence that frame-complete notification is absent.
 - **Stalls sit in the middle of busy periods.** 161 of 176 gaps over 100 ms started within 500 ms of 20+ register/command events. Typical shape: the guest's ISR reads 0x6/0x5/0xb, then nothing for 2-5 s, then a new command. Nothing the device could answer is outstanding in those gaps.
 - **Host CPU contention does show.** Compiling on the host during a vsynctester run gave 38 of 130 s under 40 fps and a 1.8 s gap, so keeping the host quiet (and QEMU threads at a higher priority) matters.
 
-No fix was found: the wait is inside Apple's closed AppleParavirtGPU/WindowServer on the guest side and the device offers no event it could be waiting on. Untested ideas: raise QEMU and vGPU thread priority on the host, and compare against a real Apple paravirt device's interrupt behaviour.
+No fix was found. The gap is between guest submissions, but the exact wait and its cause remain unproven. Compare shared-page interrupt enable/raise/acknowledgement behavior with a real Apple paravirt device before changing notification semantics.
 
 Tried raising the QEMU process priority to High: 4.4 -> 4.0 avg active fps (4 cycles each, with the register trace still on), so no gain. Not a fix.
 
@@ -204,3 +204,73 @@ samples are not the matched results above.
 - Only the disposable overlay and copied firmware were written during the
   matched tests. The installed source VM disk's full SHA256 was unchanged.
   The initial excluded boot used the existing development VM.
+
+## Follow-up: current Tahoe guest and actual Control Center (2026-10-19)
+
+Branch: `steelbrain/stutter-investigation`, after merging launcher theme,
+deletion and topology work into local `main`. The test used a fresh disposable
+overlay of the installed 26.7.1 guest, copied firmware, 8 vCPUs, one thread per
+core, 8 GiB and 1920x1080. Optional WHPX tweaks were off. The installed disk
+was not a writable test target.
+
+Safari automation closed restored windows and verified exactly **one** tab
+with the local canvas workload. A guest-only screenshot confirmed the real
+Control Center popover opened. `METAL_ERROR_MODE=5`, Reduce Transparency and
+Reduce Motion were already enabled; reapplying them would not be a new fix.
+
+| Interval | Duration | Median | p95 | p99 | Maximum |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Canvas + verified popover + guest profiling | 90 s | 17.016 ms | 30.421 ms | 58.999 ms | 1602.398 ms |
+| Desktop widgets hidden | 60 s | 17.048 ms | 30.273 ms | 50.611 ms | 1626.038 ms |
+| Widgets restored, steady canvas | 60 s | 16.766 ms | 18.982 ms | 34.771 ms | 2837.924 ms |
+
+These are guest-frame callback intervals, not physical scanout. The first
+run included `top` and a root WindowServer sample; interaction and profiling
+overhead were not matched across the three intervals. They do **not** establish
+a before/after performance gain or regression. They do show that hiding
+desktop widgets did not eliminate long gaps. Hiding does not stop widget
+extension processes. Both tested widget preference values were restored.
+
+### Separate slow paths, not one universal GPU bottleneck
+
+- Immediately after login, the guest reached 0% idle and load averages above
+  100, with software update, scheduling, icon and aerial wallpaper services
+  active. Later, without the animation, it settled to about 97% idle. Cold
+  login pressure is real but is not evidence of permanent CPU saturation.
+- During the verified popover plus animation, guest snapshots showed about
+  85-87% idle. No swap activity was observed. This does not exclude a busy
+  single thread or a short unsampled scheduling delay.
+- Window GPU times were typically 1.6-2 ms, and guest/window frame rates
+  tracked each other. The root WindowServer sample reached `CompositorMetal`,
+  `CA::OGL::MetalContext` and `AppleParavirtGPUMetal`: this compositor is using
+  **Metal**, despite the `OGL` namespace. An OpenGL translation layer does not
+  address this observed path. Legacy software OpenGL remains a separate app
+  compatibility problem; the existing bridge/ANGLE investigation is documented
+  in [WEBGL_DIAGNOSIS.md](WEBGL_DIAGNOSIS.md).
+
+### Correction: present completion exists
+
+`display/guest_display/present.rs::completion()` sets `INTERRUPT_PRESENT`
+in the shared page's `RAISED_INTERRUPTS` and pokes the device if the guest
+enabled that bit. `display/frame.rs::present_frame()` invokes completion
+under the display mutex after waiting for in-flight frames. The older claim
+that the device has "no frame-complete signal at all" was incorrect.
+No `frames still in flight` timeout was found in the current test logs.
+Neither this code inspection nor a mostly idle WindowServer sample proves
+that every guest notification is delivered with correct timing.
+
+**No new stutter fix is demonstrated.** No fake completions, guest security
+changes, cache deletion, disabled update/indexing services or replacement GL
+driver were applied. The next useful trace must correlate an actual long
+frame gap with shared-page interrupt state and guest/host thread waits.
+
+For repeatable low-privilege CPU/memory collection, the tools volume now
+includes `diagnose-stutter.sh`; see the Windows manual. It changes no settings
+and reports its overhead explicitly. Use separate, unprofiled runs for timing
+comparisons. Raw guest stacks/screenshots remain private under `.work`.
+Local measurement folders: `benchmark-20261019-180550-277`,
+`benchmark-20261019-180828-012`, `benchmark-20261019-180956-450`.
+The guest shut down through its own shutdown command before QEMU exited;
+the installed source disk's full SHA256 remained unchanged. ACPI powerdown
+alone had exceeded a 120-second deadline and was not treated as proof of a
+GPU hang. The release archive was left unchanged.

@@ -166,15 +166,16 @@ settings in section 6 matter more.
 sets keyboard, time zone and sleep options. Open it from Finder if you use the
 Windows manager application.
 
-## 6. Make it faster: reduce animations, blur and Liquid Glass
+## 6. Reduce visual work (not a proven stall fix)
 
-Tahoe's translucent, blurred "Liquid Glass" surfaces and animations are drawn
-partly in software inside the guest. A paravirtual GPU cannot hide that. Turn
-them down in **System Settings** (these cannot be set from a script):
+Some Tahoe icon, image and shape work runs on the guest CPU; WindowServer also
+uses the accelerated Metal compositor. Reducing visual effects can reduce
+work, but long stalls have reproduced with Reduce Transparency and Reduce
+Motion already enabled. These are optional comfort settings, not a verified
+solution for the intermittent freezes:
 
 1. **Accessibility → Display → Reduce Transparency: on.** Removes the blur
-   and translucency from menus, the Dock, sidebars and Control Center, which is
-   the largest single saving.
+   and translucency from menus, the Dock, sidebars and Control Center.
 2. **Accessibility → Display → Reduce Motion: on.** Replaces zoom and slide
    animations with fades.
 3. **Desktop & Dock:** turn off *Animate opening applications*, turn off
@@ -191,6 +192,32 @@ them down in **System Settings** (these cannot be set from a script):
    apps once after installing and let them finish; later launches are faster.
 8. Apps that use OpenGL (for example Chess and old games) run on a software
    renderer in the guest. Metal apps are accelerated; OpenGL is not.
+
+### Record an intermittent slowdown without changing settings
+
+Rebuild the tools volume with `prepare-tools.ps1` while the VM is stopped.
+Inside macOS Terminal, run as your normal user:
+
+```sh
+sh /Volumes/REIMSTOOLS/diagnose-stutter.sh 60
+```
+
+The optional duration is 5-300 samples, approximately one second apart.
+Reproduce the slowdown while it records. The script creates a private temporary
+directory and prints its path. `system.txt` records timestamps, CPU count,
+memory, power settings and before/after VM counters; `processes.txt` records
+the busiest process names, CPU and memory. It needs no administrator password,
+uploads nothing and does not change preferences, services or security.
+Review the files before sharing. A command failure exits nonzero and reports
+where the partial output was saved.
+
+For correlation, run `.\scripts\windows\benchmark.ps1 -Seconds 60 -FrameTrace`
+on Windows at the same time. Guest `top` sampling consumes CPU, so do not
+compare a profiled run with an unprofiled one as proof of an optimization.
+Close restored Safari test tabs and verify only one animation is running.
+CPU/memory collection alone cannot identify a driver wait. See
+[the measured findings](windows-ui-stall-findings.md) for the unresolved gaps
+and the distinction between cold-login CPU load and steady-state stutters.
 
 ## 7. Day to day
 

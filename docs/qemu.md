@@ -1758,3 +1758,22 @@ disk and firmware booted macOS after restricting the installed macOS
 profile to APFS/HFS discovery (`ScanPolicy=0x301`). This boot and the disk
 growth establish OS/storage behavior; they do not qualify the Metal bridge
 or WebGL on the new OS version.
+
+The 2026-10-19 Windows/WHPX stutter follow-up used a disposable overlay of the
+installed 26.7.1 guest, copied firmware, 8 vCPUs, 8 GiB and 1920x1080, with
+optional WHPX tweaks off. One local Safari animation tab was verified after
+closing restored windows. An actual Control Center popover was visually
+confirmed. Guest-frame gaps still reached 1.6 s; a later steady-canvas sample
+reached 2.8 s. These intervals had unmatched interactions/profiling and are
+not an optimization comparison. GPU work was typically 1.6-2 ms per draw.
+WindowServer's sample used the Metal compositor, not a legacy software GL
+path. Hiding desktop widgets did not eliminate the gaps and was reverted.
+
+Present completion is implemented in the shared display page, with a device
+poke conditional on the guest's enabled interrupt bits; zero device-wide
+display-register reads do not establish missing completion support. No
+in-flight-frame timeout appeared in this follow-up. No new pacing fix is
+demonstrated. [Windows UI stall findings](windows-ui-stall-findings.md) records
+the measurements, limitations and corrected earlier conclusions. The tools
+volume's read-only `diagnose-stutter.sh` can collect guest CPU/memory evidence;
+its profiling overhead must be kept separate from clean timing comparisons.
