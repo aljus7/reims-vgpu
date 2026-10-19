@@ -6,6 +6,7 @@ param(
     [switch]$DryRun,
     [switch]$Paused,
     [switch]$Headless,
+    [switch]$WhpxTweaks,
     [switch]$DiagnosticTcg
 )
 $ErrorActionPreference = 'Stop'
@@ -39,6 +40,7 @@ try {
     if ($DryRun) { $startParameters.DryRun = $true }
     if ($Paused) { $startParameters.Paused = $true }
     if ($Headless) { $startParameters.Headless = $true }
+    if ($WhpxTweaks) { $startParameters.WhpxTweaks = $true }
     if ($DiagnosticTcg) { $startParameters.DiagnosticTcg = $true }
     & (Join-Path $ProjectRoot 'scripts\windows\start.ps1') @startParameters
 } finally {

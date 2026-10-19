@@ -119,3 +119,88 @@ Traced every register write, the interrupt-register reads and every FIFO command
 No fix was found: the wait is inside Apple's closed AppleParavirtGPU/WindowServer on the guest side and the device offers no event it could be waiting on. Untested ideas: raise QEMU and vGPU thread priority on the host, and compare against a real Apple paravirt device's interrupt behaviour.
 
 Tried raising the QEMU process priority to High: 4.4 -> 4.0 avg active fps (4 cycles each, with the register trace still on), so no gain. Not a fix.
+
+## WINQ-inspired WHPX experiment (2026-10-19)
+
+Branch: `perf/whpx-timing`, against pinned QEMU
+`7100064d13b42bb1be16671fcf18435822b13c3c`. This does not replace the
+Reims QEMU fork or update the release ZIP.
+
+Source inspection corrected the earlier README-only suggestions:
+
+- PAT register synchronization and FastHypercallOutput are already implemented
+  in our QEMU. They are not missing optimizations.
+- WINQ's high-resolution waits are in its Venus renderer, not a generic QEMU
+  timer patch. We do not use that renderer. This branch instead exposes a
+  separate, optional `timeBeginPeriod(1)` request in the QEMU process, balanced
+  at normal exit; it does not implement Venus' sub-millisecond waits.
+- `WHvAdviseGpaRange(Pin)` keeps backing memory resident, per Microsoft's API
+  documentation. It does not promise large SLAT pages or solve Reims' scattered
+  page-remapping cost. PAT synchronization and memory pinning are separate.
+- Our MSR exit handler emulates known registers, including topology and
+  APIC behavior, and respects the unknown-MSR fault policy. Blanket
+  ignore-write/read-zero shortcuts are not ported.
+- No Linux/Venus renderer, CPU passthrough or hybrid-topology changes are used.
+
+The candidate adds a configurable exit-loop budget, optional pin/unpin advice
+for eligible RAM mappings of at least 256 MiB, and the optional 1 ms timer
+request. All are **off by default**. `Start-VM.ps1 -WhpxTweaks` enables the
+5 ms budget, pinning and timer request together. Single-step sequences are
+excluded from the budget. The cap is checked between exits; it cannot interrupt
+an individual long `WHvRunVirtualProcessor` call.
+
+### Matched desktop measurement
+
+Host: Windows build 28120, RX 6600. Guest: macOS 26.7.1, 8 vCPUs, 8 GiB,
+1920x1080. Original executable compared with a stripped, no-debug candidate.
+Both use the same Reims DLL, guest disk state (via a disposable overlay), and
+Safari canvas animation. No build ran during either measured interval.
+
+The HTTP workload was visually checked. All restored Safari windows/tabs were
+closed; AppleScript verified one loaded test tab across all browser windows
+before and after each sample. Both samples ran for approximately 120 seconds
+with the same window size, a 15-second workload warmup, stats enabled, and
+QEMU's guest-frame callback trace enabled. These measure guest submissions,
+not physical scanout or Safari's JavaScript callback times.
+
+| Metric | Original QEMU | All three tweaks |
+| --- | ---: | ---: |
+| Frame callbacks | 7041 | 6946 |
+| Median interval | 16.994 ms | 16.874 ms |
+| p95 interval | 18.986 ms | 18.517 ms |
+| p99 interval | 34.995 ms | 50.120 ms |
+| Maximum interval | 68.759 ms | 68.470 ms |
+| Average QEMU CPU (100% = one core) | 122.94% | 125.59% |
+
+**No demonstrated improvement.** Typical pacing is similar, and the candidate's
+p99 was worse in this pair. Neither matched sample reproduced a 250 ms or
+multi-second freeze. This short comparison cannot establish a rare-stall fix
+or a statistically significant regression, nor isolate the three effects.
+Keep the experiments opt-in; do not promote them to release defaults.
+
+Local raw evidence:
+`.work\diagnostics\benchmark-20261019-170356-089` (original),
+`.work\diagnostics\benchmark-20261019-170904-200` (candidate), and
+`.work\diagnostics\whpx-comparison.json`. The candidate executable SHA256 is
+`823fd1245c9010e5b8660b4d3ea15fb00cc668d0cb716de5b1e2d743165c7a5a`.
+
+An early original-worktree boot hit AHCI timeouts and was excluded. A candidate
+sample with Safari's restored, missing `file:///tmp/` page was also explicitly
+discarded, not interpreted as rendering performance. Earlier exploratory
+samples are not the matched results above.
+
+### Other checks and preservation
+
+- Three consecutive final hardware smoke-test passes covered default/off/on
+  options, WHPX partition creation, run/pause, clean exit and refusal of an
+  invalid loop budget.
+- The native QEMU reset/xstate and topology/MSR regression checks passed.
+- The Windows VM fixture passed 109 assertions, including argument forwarding
+  and refusal of combining WHPX tweaks with TCG. An optional inspection of
+  existing EFI artifacts fails their pre-existing `SecureBootModel` expectation;
+  those firmware files were not changed for this experiment.
+- Patch application tests cover fresh application, idempotence, reversal and
+  refusal without partial edits on incompatible sources.
+- Only the disposable overlay and copied firmware were written during the
+  matched tests. The installed source VM disk's full SHA256 was unchanged.
+  The initial excluded boot used the existing development VM.

@@ -7,6 +7,7 @@ param(
     [switch]$Headless,
     [switch]$WithoutInstaller,
     [switch]$DiagnosticTcg,
+    [switch]$WhpxTweaks,
     [switch]$FunctionsOnly
 )
 . "$PSScriptRoot/environment.ps1"
@@ -165,7 +166,11 @@ function Get-ReimsWhpxStatus {
 }
 
 function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused, [switch]$Headless,
-    [switch]$WithoutInstaller, [switch]$DiagnosticTcg) {
+    [switch]$WithoutInstaller, [switch]$DiagnosticTcg, [switch]$WhpxTweaks) {
+    if ($WhpxTweaks -and $DiagnosticTcg) { throw 'WHPX tweaks cannot be used with TCG.' }
+    $accelerator = if ($DiagnosticTcg) { 'tcg' } elseif ($WhpxTweaks) {
+        'whpx,hyperv=off,exit-loop-budget-ms=5,pin-gpa=on,high-resolution-timer=on'
+    } else { 'whpx,hyperv=off' }
     $code = ConvertTo-ReimsQemuPath $Config.firmware_code
     $vars = ConvertTo-ReimsQemuPath $Config.firmware_vars
     $oc = ConvertTo-ReimsQemuPath $Config.opencore
@@ -181,7 +186,7 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
     # macOS needs QEMU's measured TSC leaf; Hyper-V passthrough reported 6.4 GHz for a 3.187 GHz clock.
     $qemuArguments = @(
         '-L', (ConvertTo-ReimsQemuPath (Join-Path $ProjectRoot 'vendor/qemu/pc-bios')),
-        '-name', 'reims-windows', '-machine', 'q35', '-accel', $(if ($DiagnosticTcg) { 'tcg' } else { 'whpx,hyperv=off' }),
+        '-name', 'reims-windows', '-machine', 'q35', '-accel', $accelerator,
         '-cpu', $(if ($DiagnosticTcg) { 'max,vendor=GenuineIntel' } else { $Config.cpu }), '-smp', "$($Config.cpus),sockets=1,cores=$($Config.cpus),threads=1", '-m', "$($Config.memory_mib)M",
         '-global', 'ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off',
         '-global', 'ICH9-LPC.disable_s3=1', '-global', 'ICH9-LPC.disable_s4=1',
@@ -231,7 +236,7 @@ $config = Get-ReimsVmConfig
 if (!$Qemu) { $Qemu = Join-Path $ProjectRoot 'build/qemu/qemu-system-x86_64.exe' }
 $Qemu = [IO.Path]::GetFullPath($Qemu)
 $run = Join-Path $VmRoot ("logs/" + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
-$qemuArgs = Get-ReimsQemuArguments $config $run -Paused:$Paused -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg
+$qemuArgs = Get-ReimsQemuArguments $config $run -Paused:$Paused -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg -WhpxTweaks:$WhpxTweaks
 $runtime = Get-ReimsRuntime
 if (!$DryRun -and $runtime -and (Get-ReimsVmProcess $runtime)) {
     $status = Invoke-ReimsQmp $runtime 'query-status'
@@ -241,7 +246,7 @@ if (!$DryRun -and $runtime -and (Get-ReimsVmProcess $runtime)) {
     $previous = Get-Content -Raw -LiteralPath (Join-Path $runtime.run_directory 'command.json') | ConvertFrom-Json
     # Launch-time -S does not constrain a retained VM's next power-on.
     $original = @(Remove-ReimsUsbLaunchArguments $previous.arguments | Where-Object { $_ -ne '-S' })
-    $expected = @(Remove-ReimsUsbLaunchArguments (Get-ReimsQemuArguments $config $runtime.run_directory -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg) | Where-Object { $_ -ne '-S' })
+    $expected = @(Remove-ReimsUsbLaunchArguments (Get-ReimsQemuArguments $config $runtime.run_directory -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg -WhpxTweaks:$WhpxTweaks) | Where-Object { $_ -ne '-S' })
     $selectedUsb=@(Get-ReimsUsbSelections $config | ForEach-Object id | Sort-Object)
     $peripherals=Invoke-ReimsQmp $runtime qom-list @{path='/machine/peripheral'}
     $liveUsb=@($peripherals | Where-Object name -Like 'hostusb-*' | ForEach-Object name | Sort-Object)

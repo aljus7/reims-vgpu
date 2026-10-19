@@ -72,6 +72,9 @@ try {
     Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $config
     $command = Get-ReimsQemuArguments $config (Join-Path $testRoot 'vm/logs/test')
     Assert-Condition ($command[$command.IndexOf('-accel') + 1] -eq 'whpx,hyperv=off') 'WHPX uses QEMU clock-frequency leaves for macOS, without Hyper-V enlightenments'
+    $tweaked = Get-ReimsQemuArguments $config $testRoot -WhpxTweaks
+    Assert-Condition ($tweaked[$tweaked.IndexOf('-accel') + 1] -eq 'whpx,hyperv=off,exit-loop-budget-ms=5,pin-gpa=on,high-resolution-timer=on') 'Experimental WHPX options are explicit and keep the macOS CPU clock policy'
+    Assert-Throws { Get-ReimsQemuArguments $config $testRoot -WhpxTweaks -DiagnosticTcg } 'cannot be used with TCG'
     Assert-Condition ('tcg' -notin $command) 'No automatic TCG fallback'
     Assert-Condition ('-no-shutdown' -in $command) 'Normal power-off retains the QEMU process'
     Assert-Condition ('ICH9-LPC.disable_s3=1' -in $command -and 'ICH9-LPC.disable_s4=1' -in $command) 'Unsupported ACPI sleep and hibernation are not advertised'

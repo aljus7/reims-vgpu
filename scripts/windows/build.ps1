@@ -1,5 +1,6 @@
 param([ValidateSet('dev', 'release', 'checked')][string]$Profile = 'release',
-       [string]$QemuSource = 'vendor/qemu')
+       [string]$QemuSource = 'vendor/qemu',
+       [switch]$WhpxTweaks)
 . (Join-Path $PSScriptRoot 'environment.ps1')
 # Release is the product: no debug symbols in the Rust library or QEMU, binaries stripped.
 $release = $Profile -eq 'release'
@@ -10,6 +11,9 @@ if ($release) {
 $qemuDebugFlags = if ($release) { '--disable-debug-info --disable-qom-cast-debug' } else { '' }
 Push-Location $ProjectRoot
 try {
+    if ($WhpxTweaks) {
+        & (Join-Path $PSScriptRoot 'Apply-QemuWhpxTweaks.ps1') -QemuSource $QemuSource
+    }
     $qemuConfigure = (Resolve-Path -LiteralPath $QemuSource).Path.Replace('\','/') + '/configure'
     Invoke-ReimsMsys 'MSYS2_ARG_CONV_EXCL="*" make -C firmware OS=Windows_NT BUILD="$(cygpath -m "$CARGO_TARGET_DIR")/firmware" rom'
     cargo xtask dist --platform vulkan --profile $Profile
@@ -31,7 +35,12 @@ try {
         Dist = '.work/target/dist-vulkan'
         Profile = $Profile
         ReimsCommit = (git rev-parse HEAD)
-        QemuCommit = (git -C vendor/qemu rev-parse HEAD)
+        QemuCommit = (git -C $QemuSource rev-parse HEAD)
+        QemuDirty = [bool](git -C $QemuSource status --porcelain --untracked-files=no)
+        WhpxTweaks = [bool]$WhpxTweaks
+        WhpxPatchSha256 = if ($WhpxTweaks) {
+            (Get-FileHash (Join-Path $PSScriptRoot 'patches\qemu-whpx-frame-pacing.patch')).Hash
+        } else { $null }
     }
     $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ProjectRoot '.work\diagnostics\build-manifest.json') -Encoding UTF8
 } finally { Pop-Location }

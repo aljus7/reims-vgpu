@@ -71,6 +71,78 @@ Important build outputs:
 wholesale for distribution; use the exporter below to resolve runtime
 dependencies and assemble only the required files.
 
+### Experimental WHPX frame-pacing candidate
+
+On `perf/whpx-timing`, build with `-WhpxTweaks` to apply the tracked QEMU
+patch before compiling. Use a separate QEMU checkout if you want to keep the
+normal source untouched. Applying the patch twice is safe; an incompatible
+source tree is rejected rather than partially patched.
+
+```powershell
+.\scripts\windows\build.ps1 -Profile release -WhpxTweaks
+.\scripts\windows\Start-VM.ps1 -VMName MyVM -WithoutInstaller -WhpxTweaks
+```
+
+This is an experiment, not a proven stutter fix. Do not overwrite your known
+working binaries or publish a release until you have compared both builds.
+The candidate keeps the macOS CPU and `hyperv=off` settings unchanged:
+
+- `Start-VM.ps1 -WhpxTweaks` sets a 5 ms budget for streams of WHPX exits.
+  This checks between exits, not during a running virtual processor, and does
+  not preempt a VP every 5 ms. Single-step/debugger sequences are excluded.
+- `Start-VM.ps1 -WhpxTweaks` also requests optional GPA pinning for writable RAM
+  regions of at least 256 MiB and a process-scoped 1 ms Windows timer period.
+  Missing pinning APIs or failed requests emit a warning and retain normal
+  mappings. The API pins backing memory to keep it resident; it is not a
+  guarantee of large SLAT pages and does not replace Reims' own page-remapping
+  path. The candidate requests unpin before removing eligible mappings.
+- The 1 ms request is balanced with `timeEndPeriod` at normal process exit.
+  It may increase power use; it is not WINQ's Venus sub-millisecond wait
+  implementation. Windows may restrict timer requests for occluded windows.
+- Without the runtime switch, all three experiments stay off. To disable the
+  loop cap when invoking the patched QEMU directly, use
+  `-accel whpx,hyperv=off,exit-loop-budget-ms=0`.
+- Individual direct-QEMU controls are `exit-loop-budget-ms=0..1000`,
+  `pin-gpa=on|off` and `high-resolution-timer=on|off`.
+
+The build manifest records the actual `-QemuSource` commit, dirty state and
+whether `-WhpxTweaks` was selected, plus the patch's SHA256. The patch is stored at
+`scripts\windows\patches\qemu-whpx-frame-pacing.patch`, independently of the
+QEMU submodule pin. Reversing it with `git -C vendor\qemu apply --reverse
+<absolute-patch-path>` and rebuilding restores the unpatched code.
+
+PAT synchronization and FastHypercallOutput are already in our pinned QEMU,
+so they are not reapplied. The MSR shortcuts are deliberately excluded: our
+backend emulates some MSRs and respects its unknown-MSR fault policy.
+Linux/Venus GPU changes, CPU passthrough and topology changes are not included.
+See [the measurements](windows-ui-stall-findings.md) for the outcome.
+
+The exit-loop and pinning experiments adapt the GPL-licensed WINQ QEMU changes
+[2dbba5e5d658](https://github.com/cmspam/winq-emu-qemu/commit/2dbba5e5d658)
+and [1f811ce0eb69](https://github.com/cmspam/winq-emu-qemu/commit/1f811ce0eb69).
+The timer request is a separate QEMU-side experiment inspired by the
+[WINQ renderer release notes](https://github.com/cmspam/winq-emu#what-was-new-in-alpha-9).
+For the actual residency semantics, see Microsoft's
+[WHvAdviseGpaRange reference](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvadvisegparange).
+
+Targeted checks for this candidate (stop other VMs before the hardware smoke
+test):
+
+```powershell
+.\scripts\windows\tests\whpx-tweaks.ps1 -QemuSource .\vendor\qemu
+.\scripts\windows\tests\whpx-accelerator.ps1 -Qemu .\build\qemu\qemu-system-x86_64.exe
+.\scripts\windows\tests\firmware-vm.ps1
+```
+
+The repeatable animation is `scripts\windows\tests\whpx-workload.html`. Serve
+only a copy of that file from an isolated directory on host loopback, access
+it in the guest via `http://10.0.2.2:<port>/`, and close all other Safari tabs
+and windows before each sample. Check the loaded title and total tab count,
+visually confirm animation, then use `benchmark.ps1 -Seconds 120 -FrameTrace`
+with the same guest, resolution, window size and diagnostics in both builds.
+Do not compile or run other CPU-heavy tasks during either sample. Stop the
+temporary HTTP server afterwards.
+
 ## Prepare and run a VM from the source tree
 
 First prepare the pinned OpenCore files and firmware, then inspect and attach

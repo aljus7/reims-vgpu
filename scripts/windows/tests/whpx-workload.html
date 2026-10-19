@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Reims frame-pacing workload</title>
+<style>
+body { margin: 0; background: #123; color: white; font: 24px sans-serif; }
+canvas { width: 100vw; height: 85vh; }
+p { margin: 12px; }
+</style>
+<canvas width="1280" height="720"></canvas>
+<p>Continuous local animation for host frame-callback measurements.</p>
+<script>
+const canvas = document.querySelector("canvas"), ctx = canvas.getContext("2d");
+function frame(t) {
+    ctx.fillStyle = "#123";
+    ctx.fillRect(0, 0, 1280, 720);
+    for (let i = 0; i < 40; i++) {
+        ctx.fillStyle = `hsl(${(i * 9 + t * .02) % 360} 75% 55%)`;
+        ctx.fillRect((t * .24 + i * 47) % 1400 - 120, 40 + i * 16, 120, 12);
+    }
+    requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>

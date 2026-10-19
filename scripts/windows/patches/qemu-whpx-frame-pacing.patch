@@ -1,0 +1,237 @@
+diff --git a/accel/whpx/whpx-common.c b/accel/whpx/whpx-common.c
+index 96dfa1546d..5ffd87f8bf 100644
+--- a/accel/whpx/whpx-common.c
++++ b/accel/whpx/whpx-common.c
+@@ -26,6 +26,7 @@
+ #include "migration/blocker.h"
+ #include "accel/accel-cpu-target.h"
+ #include <winerror.h>
++#include <mmsystem.h>
+ 
+ #include "system/whpx-internal.h"
+ #include "system/whpx-accel-ops.h"
+@@ -311,6 +312,24 @@ static void whpx_set_phys_mem(MemoryRegionSection *section, bool add)
+     }
+ 
+     if (!add) {
++        if (whpx->pin_gpa && whp_dispatch.WHvAdviseGpaRange &&
++            memory_region_is_ram(area) && writable &&
++            QEMU_IS_ALIGNED(size, page_size) &&
++            QEMU_IS_ALIGNED(gva, page_size) &&
++            size >= (256ULL * 1024 * 1024)) {
++            WHV_MEMORY_RANGE_ENTRY range = {
++                .GuestAddress = gva,
++                .SizeInBytes = size,
++            };
++
++            hr = whp_dispatch.WHvAdviseGpaRange(whpx->partition, &range, 1,
++                                             WHvAdviseGpaRangeCodeUnpin,
++                                             NULL, 0);
++            if (FAILED(hr)) {
++                warn_report_once("WHPX: GPA unpin failed, hr=%08lx; "
++                                 "continuing with GPA unmap", hr);
++            }
++        }
+         hr = whp_dispatch.WHvUnmapGpaRange(whpx->partition,
+                 gva, size);
+         if (FAILED(hr)) {
+@@ -330,6 +349,22 @@ static void whpx_set_phys_mem(MemoryRegionSection *section, bool add)
+         error_report("WHPX: failed to map GPA range");
+         abort();
+     }
++
++    if (whpx->pin_gpa && whp_dispatch.WHvAdviseGpaRange &&
++        memory_region_is_ram(area) && writable &&
++        size >= (256ULL * 1024 * 1024)) {
++        WHV_MEMORY_RANGE_ENTRY range = {
++            .GuestAddress = gva,
++            .SizeInBytes = size,
++        };
++
++        hr = whp_dispatch.WHvAdviseGpaRange(whpx->partition, &range, 1,
++                                         WHvAdviseGpaRangeCodePin, NULL, 0);
++        if (FAILED(hr)) {
++            warn_report_once("WHPX: GPA pinning unavailable, hr=%08lx; "
++                             "using normal GPA mappings", hr);
++        }
++    }
+ }
+ 
+ static void whpx_region_add(MemoryListener *listener,
+@@ -375,8 +410,25 @@ static MemoryListener whpx_memory_listener = {
+     .priority = MEMORY_LISTENER_PRIORITY_ACCEL,
+ };
+ 
++static void whpx_restore_timer_resolution(void)
++{
++    timeEndPeriod(1);
++}
++
+ void whpx_memory_init(void)
+ {
++    if (whpx_global.high_resolution_timer) {
++        MMRESULT result = timeBeginPeriod(1);
++
++        if (result != TIMERR_NOERROR) {
++            warn_report("WHPX: 1 ms timer request failed (%u); "
++                        "using default timer resolution", result);
++        } else if (atexit(whpx_restore_timer_resolution) != 0) {
++            timeEndPeriod(1);
++            warn_report("WHPX: timer cleanup registration failed; "
++                        "using default timer resolution");
++        }
++    }
+     memory_listener_register(&whpx_memory_listener, &address_space_memory);
+ }
+ 
+@@ -521,6 +573,49 @@ static const TypeInfo whpx_cpu_accel_type = {
+     .abstract = true,
+ };
+ 
++static void whpx_get_exit_loop_budget(Object *obj, Visitor *v,
++                                     const char *name, void *opaque,
++                                     Error **errp)
++{
++    visit_type_uint32(v, name, &whpx_global.exit_loop_budget_ms, errp);
++}
++
++static void whpx_set_exit_loop_budget(Object *obj, Visitor *v,
++                                     const char *name, void *opaque,
++                                     Error **errp)
++{
++    uint32_t budget;
++
++    if (!visit_type_uint32(v, name, &budget, errp)) {
++        return;
++    }
++    if (budget > 1000) {
++        error_setg(errp, "exit-loop-budget-ms must be 0 to 1000");
++        return;
++    }
++    whpx_global.exit_loop_budget_ms = budget;
++}
++
++static bool whpx_get_pin_gpa(Object *obj, Error **errp)
++{
++    return whpx_global.pin_gpa;
++}
++
++static void whpx_set_pin_gpa(Object *obj, bool value, Error **errp)
++{
++    whpx_global.pin_gpa = value;
++}
++
++static bool whpx_get_high_resolution_timer(Object *obj, Error **errp)
++{
++    return whpx_global.high_resolution_timer;
++}
++
++static void whpx_set_high_resolution_timer(Object *obj, bool value, Error **errp)
++{
++    whpx_global.high_resolution_timer = value;
++}
++
+ static void whpx_accel_class_init(ObjectClass *oc, const void *data)
+ {
+     AccelClass *ac = ACCEL_CLASS(oc);
+@@ -539,6 +634,18 @@ static void whpx_accel_class_init(ObjectClass *oc, const void *data)
+         NULL, NULL);
+     object_class_property_set_description(oc, "hyperv",
+         "Configure Hyper-V enlightenments");
++    object_class_property_add(oc, "exit-loop-budget-ms", "uint32",
++        whpx_get_exit_loop_budget, whpx_set_exit_loop_budget, NULL, NULL);
++    object_class_property_set_description(oc, "exit-loop-budget-ms",
++        "Maximum time between WHPX exit-loop yields (0 disables, default 0)");
++    object_class_property_add_bool(oc, "pin-gpa",
++        whpx_get_pin_gpa, whpx_set_pin_gpa);
++    object_class_property_set_description(oc, "pin-gpa",
++        "Advise pinning RAM GPA ranges of at least 256 MiB (default off)");
++    object_class_property_add_bool(oc, "high-resolution-timer",
++        whpx_get_high_resolution_timer, whpx_set_high_resolution_timer);
++    object_class_property_set_description(oc, "high-resolution-timer",
++        "Request 1 ms Windows timer resolution while QEMU runs (default off)");
+ 
+     whpx_arch_accel_class_init(oc);
+ }
+@@ -558,6 +665,8 @@ static void whpx_accel_instance_init(Object *obj)
+     whpx->ignore_unknown_msr = true;
+     whpx->intercept_msr_gp = false;
+     whpx->separate_security_domain = true;
++    whpx->exit_loop_budget_ms = 0;
++    whpx->pin_gpa = false;
+ }
+ 
+ static const TypeInfo whpx_accel_type = {
+@@ -584,6 +693,9 @@ bool init_whp_dispatch(void)
+     }
+     assert(load_whp_dispatch_fns(&hWinHvPlatform,
+         WINHV_PLATFORM_FNS_SUPPLEMENTAL));
++    if (whpx_global.pin_gpa && !whp_dispatch.WHvAdviseGpaRange) {
++        warn_report("WHPX: GPA pinning API unavailable; using normal GPA mappings");
++    }
+     whp_dispatch_initialized = true;
+ 
+     return true;
+diff --git a/include/system/whpx-internal.h b/include/system/whpx-internal.h
+index c295c5a529..755203b359 100644
+--- a/include/system/whpx-internal.h
++++ b/include/system/whpx-internal.h
+@@ -51,6 +51,9 @@ struct whpx_state {
+ 
+     bool ignore_unknown_msr;
+     bool intercept_msr_gp;
++    uint32_t exit_loop_budget_ms;
++    bool pin_gpa;
++    bool high_resolution_timer;
+ };
+ 
+ extern struct whpx_state whpx_global;
+@@ -102,6 +105,11 @@ void whpx_apic_get(APICCommonState *s);
+          UINT32 StateSize)) \
+   X(HRESULT, WHvResetPartition, \
+         (WHV_PARTITION_HANDLE Partition)) \
++  X(HRESULT, WHvAdviseGpaRange, \
++        (WHV_PARTITION_HANDLE Partition, \
++         const WHV_MEMORY_RANGE_ENTRY *GpaRanges, UINT32 GpaRangesCount, \
++         WHV_ADVISE_GPA_RANGE_CODE Advice, const VOID *AdviceBuffer, \
++         UINT32 AdviceBufferSizeInBytes)) \
+   X(HRESULT, WHvGetVirtualProcessorXsaveState, \
+         (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, \
+         PVOID Buffer, \
+diff --git a/target/i386/whpx/whpx-all.c b/target/i386/whpx/whpx-all.c
+index 3da64491a6..7a448e5444 100644
+--- a/target/i386/whpx/whpx-all.c
++++ b/target/i386/whpx/whpx-all.c
+@@ -2348,6 +2348,8 @@ int whpx_vcpu_run(CPUState *cpu)
+     struct whpx_breakpoint *stepped_over_bp = NULL;
+     WhpxStepMode exclusive_step_mode = WHPX_STEP_NONE;
+     int ret;
++    const int64_t budget_us = (int64_t)whpx->exit_loop_budget_ms * 1000;
++    int64_t loop_start_us;
+ 
+     g_assert(bql_locked());
+ 
+@@ -2415,6 +2417,7 @@ int whpx_vcpu_run(CPUState *cpu)
+         cpu_exec_start(cpu);
+     }
+ 
++    loop_start_us = budget_us ? g_get_monotonic_time() : 0;
+     do {
+         if (cpu->vcpu_dirty) {
+             whpx_set_registers(cpu, WHPX_LEVEL_RUNTIME_STATE);
+@@ -2853,6 +2856,15 @@ int whpx_vcpu_run(CPUState *cpu)
+             break;
+         }
+ 
++        /*
++         * Yield after a stream of cheap exits, but never interrupt the
++         * exclusive single-step sequence. This is not a VP preemption timer.
++         */
++        if (!ret && budget_us && exclusive_step_mode == WHPX_STEP_NONE &&
++            g_get_monotonic_time() - loop_start_us >= budget_us) {
++            cpu->exception_index = EXCP_INTERRUPT;
++            ret = 1;
++        }
+     } while (!ret);
+ 
+     if (stepped_over_bp) {
