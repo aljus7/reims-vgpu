@@ -20,6 +20,12 @@ thread_local! {
     static PIPELINES: Cell<(u32, u64)> = const { Cell::new((0, 0)) };
 }
 
+/// Whether the timings are taken at all: only when info lines go somewhere (`REIMS_VGPU_LOG`, or
+/// a host's hook), so a release run reads no clock for them.
+pub fn enabled() -> bool {
+    log::max_level() >= log::LevelFilter::Info
+}
+
 /// Records one pipeline creation of `took` on this thread.
 pub fn add_pipeline(took: Duration) {
     let nanos = u64::try_from(took.as_nanos()).unwrap_or(u64::MAX);

@@ -118,6 +118,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use reims_vgpu_core::host::{
     CreateTask, DestroyTask, HostBlocks, HostPtr, HostTask, MapMemory, UnmapMemory,
@@ -257,6 +258,19 @@ pub(crate) fn shows_guest_pages(first: HostPtr, length: u64) -> bool {
 /// ([`UnmapHold`]). A leaf lock: nothing is called under it.
 static HOLDS: Mutex<Holds> = Mutex::new(Holds::new());
 
+/// The [`UnmapHold`]s alive, and the bytes of their pages: the runtime's live imports of host
+/// memory, for the timing lines ([`crate::gpu::timing::import`]).
+static LIVE_HOLDS: AtomicU64 = AtomicU64::new(0);
+static LIVE_HOLD_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// How many runtime imports of host memory live, and the bytes of their pages.
+pub(crate) fn live_imports() -> (u64, u64) {
+    (
+        LIVE_HOLDS.load(Ordering::Relaxed),
+        LIVE_HOLD_BYTES.load(Ordering::Relaxed),
+    )
+}
+
 /// A hold on the host pages a runtime import covers, which the runtime is given in a no-copy
 /// buffer's keep-alive: while it lives, [`VulkanVm`]'s `deallocate` of pages it meets leaves them
 /// mapped, and its drop, which the runtime makes once it freed the import, unmaps them (module
@@ -267,6 +281,8 @@ pub(crate) struct UnmapHold {
     first: u64,
     /// Its number among the holds.
     id: u64,
+    /// The bytes of its pages.
+    length: u64,
 }
 
 impl UnmapHold {
@@ -276,13 +292,17 @@ impl UnmapHold {
         let (at, length) = pages(at, length.max(1), OsVm::new().page_size());
         let first = at.addr().to_u64();
         let id = HOLDS.lock().hold(first..first.saturating_add(length));
-        UnmapHold { first, id }
+        LIVE_HOLDS.fetch_add(1, Ordering::Relaxed);
+        LIVE_HOLD_BYTES.fetch_add(length, Ordering::Relaxed);
+        UnmapHold { first, id, length }
     }
 }
 
 impl Drop for UnmapHold {
     /// Unmaps what waited for this hold and no other: under no lock, calling nothing else.
     fn drop(&mut self) {
+        LIVE_HOLDS.fetch_sub(1, Ordering::Relaxed);
+        LIVE_HOLD_BYTES.fetch_sub(self.length, Ordering::Relaxed);
         let free = HOLDS.lock().release(self.first, self.id);
         if free.is_empty() {
             return;

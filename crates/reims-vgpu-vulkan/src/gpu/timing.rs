@@ -83,6 +83,32 @@ fn elapsed_since(start: MonoTime) -> Duration {
     now().saturating_duration_since(start)
 }
 
+/// A no-copy buffer import that takes this long or longer is written ([`import`]).
+pub const SLOW_IMPORT: Duration = Duration::from_millis(10);
+
+/// Makes a no-copy buffer over `length` bytes of host memory (`make`), and, where info lines are
+/// on (`REIMS_VGPU_LOG=info`), writes one that took [`SLOW_IMPORT`] or more with the imports
+/// live then, so a log tells whether imports slow down as they pile up. With info lines off it
+/// reads no clock.
+pub fn import<T>(length: u64, make: impl FnOnce() -> T) -> T {
+    if !log::log_enabled!(log::Level::Info) {
+        return make();
+    }
+    let start = now();
+    let made = make();
+    let took = elapsed_since(start);
+    if took >= SLOW_IMPORT {
+        let (live, bytes) = crate::remap::live_imports();
+        log::info!(
+            "reims-vgpu timing: a no-copy buffer over {length} bytes took {:.1} ms to import; \
+             {live} imports live, {} MiB",
+            ms(took),
+            bytes >> 20
+        );
+    }
+    made
+}
+
 /// `d` in milliseconds.
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0

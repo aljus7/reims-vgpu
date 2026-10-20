@@ -780,33 +780,36 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
         // The bytes, or a writable twin of them where the runtime cannot import them as mapped,
         // and what keeps them mapped until the runtime freed its import.
         let (imported, run, keep, kept) = no_copy_release(start, bytes.len(), run);
-        let made = create(
-            sel,
-            Policy::Dies,
-            placed_nil(&placing, Nil::BufferLength),
-            || {
-                // SAFETY: `HostRange::new`'s contract keeps the bytes mapped until the deallocator
-                // runs, or for the buffer's life with none, and an unmap of core's through the
-                // platform's VM waits for the keep-alive; a twin of them stays until it goes.
-                let memory = unsafe { crate::os::host_memory(imported) };
-                let contents = rt::BufferContents::NoCopy {
-                    memory,
-                    deallocator: run,
-                    keep_alive: Some(keep),
-                };
-                let descriptor = rt::BufferDescriptor::new(bytes.len(), options, contents)
-                    .with_placement(placement);
-                match self
-                    .raw
-                    .new_buffer_with_descriptor(with_token(descriptor, token))
-                {
-                    Ok(raw) => Ok(Some(raw)),
-                    // Pages Metal makes no buffer over: nil.
-                    Err(_) if !OsVm::new().readable(bytes.ptr(), bytes.len()) => Ok(None),
-                    Err(e) => Err(e),
-                }
-            },
-        )
+        let made = crate::gpu::timing::import(bytes.len(), || {
+            create(
+                sel,
+                Policy::Dies,
+                placed_nil(&placing, Nil::BufferLength),
+                || {
+                    // SAFETY: `HostRange::new`'s contract keeps the bytes mapped until the
+                    // deallocator runs, or for the buffer's life with none, and an unmap of
+                    // core's through the platform's VM waits for the keep-alive; a twin of them
+                    // stays until it goes.
+                    let memory = unsafe { crate::os::host_memory(imported) };
+                    let contents = rt::BufferContents::NoCopy {
+                        memory,
+                        deallocator: run,
+                        keep_alive: Some(keep),
+                    };
+                    let descriptor = rt::BufferDescriptor::new(bytes.len(), options, contents)
+                        .with_placement(placement);
+                    match self
+                        .raw
+                        .new_buffer_with_descriptor(with_token(descriptor, token))
+                    {
+                        Ok(raw) => Ok(Some(raw)),
+                        // Pages Metal makes no buffer over: nil.
+                        Err(_) if !OsVm::new().readable(bytes.ptr(), bytes.len()) => Ok(None),
+                        Err(e) => Err(e),
+                    }
+                },
+            )
+        })
         .map(Option::flatten);
         keep_unrun(&made, slot);
         // Core makes a task's no-copy buffers over its own mappings of the guest's pages.

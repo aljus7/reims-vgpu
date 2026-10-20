@@ -16,7 +16,7 @@ use crate::platform::blit::{BlitCmd, BlitEncoder};
 use crate::platform::command::{CommandBuffer, CommandQueue, CompletedHandler, CompletedInfo};
 use crate::platform::compute::{ComputeCmd, ComputeEncoder};
 use crate::platform::event::EventRef;
-use crate::platform::os::Clock;
+use crate::platform::os::{Clock, MonoTime};
 use crate::platform::types::{CommandBufferStatus, NsErrorText};
 use crate::platform::{Handle, Platform};
 use crate::raise::OnFault;
@@ -73,9 +73,17 @@ impl<P: Platform> LocalTask<P> {
         value: u64,
     ) -> RaiseResult<PrepareSync<P>> {
         let clock = self.platform.clock();
-        let waiting = clock.now_mono();
+        let timed = timing::enabled();
+        let now = || {
+            if timed {
+                clock.now_mono()
+            } else {
+                MonoTime::default()
+            }
+        };
+        let waiting = now();
         let _prepare = self.prepare_mutex.lock();
-        let started = clock.now_mono();
+        let started = now();
         let mut sync = PrepareSync::<P> {
             needs_sync: false,
             needs_complete: false,
@@ -90,10 +98,10 @@ impl<P: Platform> LocalTask<P> {
         let mut slowest_lookup = (Duration::ZERO, 0u32);
         for i in 0..resources.count() {
             let resource = resources.get(i)?;
-            let looking = clock.now_mono();
+            let looking = now();
             // Made on first use; a raise abandons the rest
             let host_resource = self.base.get_host_resource(hold, resource.reference)?;
-            let looked = clock.now_mono().saturating_duration_since(looking);
+            let looked = now().saturating_duration_since(looking);
             if looked > slowest_lookup.0 {
                 slowest_lookup = (looked, resource.reference);
             }
@@ -121,7 +129,7 @@ impl<P: Platform> LocalTask<P> {
                 sync.needs_complete = true;
             }
         }
-        let looked_up = clock.now_mono();
+        let looked_up = now();
         if !blit_resources.is_empty() || !compute_resources.is_empty() {
             let command_buffer = match &self.base.paging_queue {
                 Some(queue) => queue.command_buffer(OnFault::Return)?,
@@ -196,20 +204,20 @@ impl<P: Platform> LocalTask<P> {
             // Every caller is under a handler (an exec's or an info's): the raise goes on
             prepared?;
         }
-        let gpu_paged = clock.now_mono();
+        let gpu_paged = now();
         let mut slowest_cpu = (Duration::ZERO, 0usize);
         (|| -> RaiseResult<_> {
             for (i, r) in cpu_resources.iter().enumerate() {
-                let paging = clock.now_mono();
+                let paging = now();
                 r.prepare_with_cpu(hold)?;
-                let paged = clock.now_mono().saturating_duration_since(paging);
+                let paged = now().saturating_duration_since(paging);
                 if paged > slowest_cpu.0 {
                     slowest_cpu = (paged, i);
                 }
             }
             Ok(())
         })()?;
-        let cpu_paged = clock.now_mono();
+        let cpu_paged = now();
         for (identifier, host_resource) in &invalidated {
             let Some(r) = host_resource else {
                 // Nothing to mark, and no host copy either
@@ -240,7 +248,7 @@ impl<P: Platform> LocalTask<P> {
             // A user task's go to the kernel task, under its lock
             self.invalidate_guest(hold, records)?;
         }
-        let finished = clock.now_mono();
+        let finished = now();
         if finished.saturating_duration_since(waiting) >= timing::SLOW_EXEC {
             let slowest_cpu_kind = cpu_resources
                 .get(slowest_cpu.1)
@@ -437,15 +445,25 @@ impl<P: Platform> LocalTask<P> {
         }
         let executed = (|| -> RaiseResult<_> {
             let clock = self.platform.clock();
-            let started = clock.now_mono();
-            let _ = timing::take_pipelines();
+            let timed = timing::enabled();
+            let now = || {
+                if timed {
+                    clock.now_mono()
+                } else {
+                    MonoTime::default()
+                }
+            };
+            let started = now();
+            if timed {
+                let _ = timing::take_pipelines();
+            }
             let prepare_sync = self.prepare_resources(
                 hold,
                 &resource_list,
                 fifo_event,
                 fifo_event_value.load(Ordering::SeqCst),
             )?;
-            let prepared = clock.now_mono();
+            let prepared = now();
             let queue = self.device.upgrade().and_then(|d| d.exec_queue());
             let command_buffer = match &queue {
                 Some(queue) => queue.command_buffer(OnFault::Return)?,
@@ -464,7 +482,7 @@ impl<P: Platform> LocalTask<P> {
             // Held past the commit, to the end of the exec (`Decoders`).
             let _decoders =
                 deserializer.decode_segments(hold, &mut cursors, command_buffer.as_ref())?;
-            let decoded = clock.now_mono();
+            let decoded = now();
             let (pipelines, pipeline_time) = timing::take_pipelines();
             if let Some(buffer) = &command_buffer {
                 let exec_buffer = buffer.clone_ref();
@@ -475,16 +493,18 @@ impl<P: Platform> LocalTask<P> {
                 buffer.add_completed_handler(
                     OnFault::Return,
                     Box::new(move |info: CompletedInfo| {
-                        let gpu = platform
-                            .clock()
-                            .now_mono()
-                            .saturating_duration_since(decoded);
-                        if gpu >= timing::SLOW_EXEC {
-                            log::info!(
-                                "reims-vgpu timing: task {task_id}: an exec's GPU work completed \
-                                 {} ms after its decode",
-                                gpu.as_millis()
-                            );
+                        if timed {
+                            let gpu = platform
+                                .clock()
+                                .now_mono()
+                                .saturating_duration_since(decoded);
+                            if gpu >= timing::SLOW_EXEC {
+                                log::info!(
+                                    "reims-vgpu timing: task {task_id}: an exec's GPU work \
+                                     completed {} ms after its decode",
+                                    gpu.as_millis()
+                                );
+                            }
                         }
                         exec_completed::<P>(&exec_buffer, &handler, needs_complete, &info);
                     }),
@@ -498,7 +518,7 @@ impl<P: Platform> LocalTask<P> {
                 buffer.encode_signal(fifo_event.map(EventRef::Shared), value)?;
                 buffer.commit(OnFault::Return)?;
             }
-            let committed = clock.now_mono();
+            let committed = now();
             if committed.saturating_duration_since(started) >= timing::SLOW_EXEC {
                 log::info!(
                     "reims-vgpu timing: task {}: an exec took {} ms on the host: prepare {} ms \

@@ -309,3 +309,66 @@ Still needed to call it fixed: multi-hour soaks with `REIMS_DEBUG=1`
 counting `exec faulted`, the remap line and new guest `.gpuRestart` reports
 against the old DLL. Rare AHCI command timeouts (30 s+ hangs) are a separate
 mechanism.
+
+### Second debug soak: the entry is really empty (2026-10-20)
+
+With the remap and the stale-resource recreation, a debug soak logged four
+exec faults and four new guest GPU resets (23 to 27): `object 731` (Maps),
+`object 42`, and twice `render pipeline lookup failed: object 513 has an
+empty entry`. No `found after remapping` line appeared, so the remap
+hypothesis does not explain them: the guest's entry is genuinely empty.
+The private-buffer fault did not recur. Each fault followed a 2 s stall
+report on the faulting FIFO.
+
+The guest empties an entry when it deletes the object (opcodes 37 and 40).
+A host lookup only reads the entry on a cache miss, so a fault means the
+host had already released the object, most likely on that delete, while an
+exec still naming it was on its way.
+
+Mitigation (`ResourceManager::retire_object`, `manager/retired.rs`): the
+guest's deletes move the object to a bounded retired list (32 resources for
+3 s, 256 objects of other kinds for 60 s) instead of releasing it. A lookup
+of an empty entry takes the retired object back and logs
+`object N has an empty entry: using the object the guest deleted Nms ago`
+once per object. An empty entry with no kept object now says
+`(deleted Nms ago, already released)` when the host saw the delete; a bare
+`has an empty entry` means the host never saw one. Discards and backing
+removals still release at once. A reused reference has a live entry and
+makes its new object as before. Whether this ends the resets has to be
+shown by soaks.
+
+### Measuring soaks: where the stalls go (2026-10-20)
+
+Exec timing (`timing.rs`, `exec.rs`, `PipelineTimer`) logs any exec that
+takes 100 ms or more on the host, split into prepare (lock wait, lookups,
+GPU paging, CPU paging, invalidation), decode with pipelines made, and
+commit. All of it is measured only when info lines are on
+(`REIMS_VGPU_LOG`, set by `REIMS_DEBUG=1`); a release run reads no clock.
+
+- A third 1-hour soak logged one fault whose guest offset was
+  `0xffffffffffffffff` (a freed marker), which no mitigation covers yet.
+- Boot 21:44 (15 min): 551 slow execs, 166 s of host time, 163.7 s of it in
+  prepare. Pipeline compiles were about 1.2 s in total. 69 gaps over 2 s.
+  One `memory.walk.hole` fault.
+- Boot 22:08 (15 min): 15 slow execs, 2.2 s; prepare went to GPU paging
+  (about 928 ms, around 210 blits each) and lookups (476 ms). One
+  `object 392 has an empty entry (deleted 180ms ago, already released)`
+  fault, which suggests the retired list's 3 s / 32 resources is too small.
+- The same boot, a further 10 minutes: 5 slow execs, 0 gaps over 2 s, 0
+  faults.
+
+So the stalls are not shader compiles: the shader cache
+(`.work\cache\metal2vulkan`, from `XDG_CACHE_HOME`; `%USERPROFILE%\.cache\
+metal2vulkan` without it) is written and pipelines take little time. They are
+GPU paging: making a no-copy buffer over the guest's pages
+(`ensure_physical`, `new_buffer_for_virtual_page`) and its upload. Stalls
+also differ a lot between boots.
+
+**It gets worse the longer the VM runs.** Over boot 22:08's log, a slow
+prepare's time per blit grew from about 100 ms (worst 0.25 s) at the start
+to 260 to 310 ms (worst 2.7 s) at the end. One suspect is the runtime's
+imports of host memory piling up, each slowing the next on the Windows
+driver. Not measured yet: `gpu::timing::import` now logs any no-copy buffer
+import of 10 ms or more with the imports live and their MiB
+(`remap::live_imports`). The next measuring soak should show whether import
+time grows with the live count.

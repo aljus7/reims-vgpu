@@ -15,17 +15,17 @@ use crate::guest::records::ObjectEntry;
 use crate::memory::cursor::Cursor;
 use crate::num::ToUsize;
 use crate::platform::Platform;
-use crate::platform::os::MonoTime;
-use crate::resources::resource::now_mono;
-use crate::timing;
 use crate::platform::descriptor::{ComputePipelineDescriptor, RenderPipelineDescriptor};
 use crate::platform::device::GpuDevice;
+use crate::platform::os::MonoTime;
 use crate::platform::resource::{ComputePipeline, RenderPipeline};
 use crate::raise::RaiseResult;
 use crate::resources::manager::DeathKind;
 use crate::resources::manager::icb::ManagerOps;
 use crate::resources::manager::records::OperationHeader;
+use crate::resources::resource::now_mono;
 use crate::rt::Hold;
+use crate::timing;
 
 /// The command types.
 const NEW_COMPUTE_PIPELINE_STATE: u32 = 11;
@@ -235,7 +235,11 @@ impl<P: Platform> PipelineTimer<P> {
         Self {
             kind,
             reference,
-            started: now_mono::<P>(),
+            started: if timing::enabled() {
+                now_mono::<P>()
+            } else {
+                None
+            },
             platform: PhantomData,
         }
     }
@@ -243,7 +247,10 @@ impl<P: Platform> PipelineTimer<P> {
 
 impl<P: Platform> Drop for PipelineTimer<P> {
     fn drop(&mut self) {
-        let (Some(started), Some(now)) = (self.started, now_mono::<P>()) else {
+        let Some(started) = self.started else {
+            return;
+        };
+        let Some(now) = now_mono::<P>() else {
             return;
         };
         let took = now.saturating_duration_since(started);
