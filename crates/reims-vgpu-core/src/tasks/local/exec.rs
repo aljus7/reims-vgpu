@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use zerocopy::IntoBytes;
 
@@ -71,7 +72,10 @@ impl<P: Platform> LocalTask<P> {
         event: Option<&P::SharedEvent>,
         value: u64,
     ) -> RaiseResult<PrepareSync<P>> {
+        let clock = self.platform.clock();
+        let waiting = clock.now_mono();
         let _prepare = self.prepare_mutex.lock();
+        let started = clock.now_mono();
         let mut sync = PrepareSync::<P> {
             needs_sync: false,
             needs_complete: false,
@@ -83,10 +87,16 @@ impl<P: Platform> LocalTask<P> {
         let mut cpu_resources: Vec<Arc<Resource<P>>> = Vec::new();
         let mut invalidated: Vec<(u32, Option<Arc<Resource<P>>>)> = Vec::new();
         let mut shared_texture_backings: Vec<u32> = Vec::new();
+        let mut slowest_lookup = (Duration::ZERO, 0u32);
         for i in 0..resources.count() {
             let resource = resources.get(i)?;
+            let looking = clock.now_mono();
             // Made on first use; a raise abandons the rest
             let host_resource = self.base.get_host_resource(hold, resource.reference)?;
+            let looked = clock.now_mono().saturating_duration_since(looking);
+            if looked > slowest_lookup.0 {
+                slowest_lookup = (looked, resource.reference);
+            }
             if resource.invalidate_host()
                 && let Some(r) = &host_resource
             {
@@ -111,6 +121,7 @@ impl<P: Platform> LocalTask<P> {
                 sync.needs_complete = true;
             }
         }
+        let looked_up = clock.now_mono();
         if !blit_resources.is_empty() || !compute_resources.is_empty() {
             let command_buffer = match &self.base.paging_queue {
                 Some(queue) => queue.command_buffer(OnFault::Return)?,
@@ -185,12 +196,20 @@ impl<P: Platform> LocalTask<P> {
             // Every caller is under a handler (an exec's or an info's): the raise goes on
             prepared?;
         }
+        let gpu_paged = clock.now_mono();
+        let mut slowest_cpu = (Duration::ZERO, 0usize);
         (|| -> RaiseResult<_> {
-            for r in &cpu_resources {
+            for (i, r) in cpu_resources.iter().enumerate() {
+                let paging = clock.now_mono();
                 r.prepare_with_cpu(hold)?;
+                let paged = clock.now_mono().saturating_duration_since(paging);
+                if paged > slowest_cpu.0 {
+                    slowest_cpu = (paged, i);
+                }
             }
             Ok(())
         })()?;
+        let cpu_paged = clock.now_mono();
         for (identifier, host_resource) in &invalidated {
             let Some(r) = host_resource else {
                 // Nothing to mark, and no host copy either
@@ -220,6 +239,31 @@ impl<P: Platform> LocalTask<P> {
         {
             // A user task's go to the kernel task, under its lock
             self.invalidate_guest(hold, records)?;
+        }
+        let finished = clock.now_mono();
+        if finished.saturating_duration_since(waiting) >= timing::SLOW_EXEC {
+            let slowest_cpu_kind = cpu_resources
+                .get(slowest_cpu.1)
+                .map_or("none", |r| r.kind_name());
+            log::info!(
+                "reims-vgpu timing: task {}: a prepare took {} ms: lock wait {} ms, lookups {} ms \
+                 (slowest {} ms, resource {}), GPU paging {} ms ({} blit, {} compute), CPU paging \
+                 {} ms ({} resources; slowest {} ms, a {}), invalidation {} ms",
+                self.task_id,
+                timing::millis(waiting, finished),
+                timing::millis(waiting, started),
+                timing::millis(started, looked_up),
+                slowest_lookup.0.as_millis(),
+                slowest_lookup.1,
+                timing::millis(looked_up, gpu_paged),
+                blit_resources.len(),
+                compute_resources.len(),
+                timing::millis(gpu_paged, cpu_paged),
+                cpu_resources.len(),
+                slowest_cpu.0.as_millis(),
+                slowest_cpu_kind,
+                timing::millis(cpu_paged, finished)
+            );
         }
         crate::fatal_unless!(
             !sync.needs_sync || sync.event.is_some(),
