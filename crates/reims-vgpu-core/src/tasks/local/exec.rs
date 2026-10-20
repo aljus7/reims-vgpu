@@ -15,6 +15,7 @@ use crate::platform::blit::{BlitCmd, BlitEncoder};
 use crate::platform::command::{CommandBuffer, CommandQueue, CompletedHandler, CompletedInfo};
 use crate::platform::compute::{ComputeCmd, ComputeEncoder};
 use crate::platform::event::EventRef;
+use crate::platform::os::Clock;
 use crate::platform::types::{CommandBufferStatus, NsErrorText};
 use crate::platform::{Handle, Platform};
 use crate::raise::OnFault;
@@ -25,6 +26,7 @@ use crate::resources::resource::Resource;
 use crate::rt::{Held, Hold};
 use crate::tasks::resource_list::ResourceList;
 use crate::tasks::{Completion, ExecStatus, Unsupported};
+use crate::timing;
 
 /// What the preparation hands the exec.
 pub(super) struct PrepareSync<P: Platform> {
@@ -390,12 +392,16 @@ impl<P: Platform> LocalTask<P> {
             return Ok(());
         }
         let executed = (|| -> RaiseResult<_> {
+            let clock = self.platform.clock();
+            let started = clock.now_mono();
+            let _ = timing::take_pipelines();
             let prepare_sync = self.prepare_resources(
                 hold,
                 &resource_list,
                 fifo_event,
                 fifo_event_value.load(Ordering::SeqCst),
             )?;
+            let prepared = clock.now_mono();
             let queue = self.device.upgrade().and_then(|d| d.exec_queue());
             let command_buffer = match &queue {
                 Some(queue) => queue.command_buffer(OnFault::Return)?,
@@ -414,13 +420,28 @@ impl<P: Platform> LocalTask<P> {
             // Held past the commit, to the end of the exec (`Decoders`).
             let _decoders =
                 deserializer.decode_segments(hold, &mut cursors, command_buffer.as_ref())?;
+            let decoded = clock.now_mono();
+            let (pipelines, pipeline_time) = timing::take_pipelines();
             if let Some(buffer) = &command_buffer {
                 let exec_buffer = buffer.clone_ref();
                 let handler = Arc::clone(&done);
                 let needs_complete = prepare_sync.needs_complete;
+                let platform = Arc::clone(&self.platform);
+                let task_id = self.task_id;
                 buffer.add_completed_handler(
                     OnFault::Return,
                     Box::new(move |info: CompletedInfo| {
+                        let gpu = platform
+                            .clock()
+                            .now_mono()
+                            .saturating_duration_since(decoded);
+                        if gpu >= timing::SLOW_EXEC {
+                            log::info!(
+                                "reims-vgpu timing: task {task_id}: an exec's GPU work completed \
+                                 {} ms after its decode",
+                                gpu.as_millis()
+                            );
+                        }
                         exec_completed::<P>(&exec_buffer, &handler, needs_complete, &info);
                     }),
                 )?;
@@ -432,6 +453,23 @@ impl<P: Platform> LocalTask<P> {
             if let Some(buffer) = &command_buffer {
                 buffer.encode_signal(fifo_event.map(EventRef::Shared), value)?;
                 buffer.commit(OnFault::Return)?;
+            }
+            let committed = clock.now_mono();
+            if committed.saturating_duration_since(started) >= timing::SLOW_EXEC {
+                log::info!(
+                    "reims-vgpu timing: task {}: an exec took {} ms on the host: prepare {} ms \
+                     ({} resources), decode {} ms ({} command buffers; {} pipelines made in {} \
+                     ms), commit {} ms",
+                    self.task_id,
+                    timing::millis(started, committed),
+                    timing::millis(started, prepared),
+                    resource_list.count(),
+                    timing::millis(prepared, decoded),
+                    cmd_buffers.iter().count(),
+                    pipelines,
+                    pipeline_time.as_millis(),
+                    timing::millis(decoded, committed)
+                );
             }
             let complete_sync = CompleteSync::<P> {
                 needs_complete: prepare_sync.needs_complete,

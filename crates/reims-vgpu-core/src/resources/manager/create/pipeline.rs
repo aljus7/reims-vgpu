@@ -5,6 +5,8 @@
 //! command answers that identifier for the pipeline it was encoded with, and the ICB synchronize
 //! walk writes back the reference registered under it, or 0 (`icb::synchronize`).
 
+use std::marker::PhantomData;
+
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use super::{STATE_OBJECT_TYPE, Slot};
@@ -13,6 +15,9 @@ use crate::guest::records::ObjectEntry;
 use crate::memory::cursor::Cursor;
 use crate::num::ToUsize;
 use crate::platform::Platform;
+use crate::platform::os::MonoTime;
+use crate::resources::resource::now_mono;
+use crate::timing;
 use crate::platform::descriptor::{ComputePipelineDescriptor, RenderPipelineDescriptor};
 use crate::platform::device::GpuDevice;
 use crate::platform::resource::{ComputePipeline, RenderPipeline};
@@ -216,6 +221,44 @@ fn command_type(entry: &ObjectEntry, cursor: &mut Cursor, what: &str) -> Result<
     Ok(header.command_type)
 }
 
+/// Times one pipeline creation, from its making to its drop: the time joins the thread's record
+/// ([`crate::timing::add_pipeline`]), and a slow one is logged.
+struct PipelineTimer<P: Platform> {
+    kind: &'static str,
+    reference: u32,
+    started: Option<MonoTime>,
+    platform: PhantomData<P>,
+}
+
+impl<P: Platform> PipelineTimer<P> {
+    fn start(kind: &'static str, reference: u32) -> Self {
+        Self {
+            kind,
+            reference,
+            started: now_mono::<P>(),
+            platform: PhantomData,
+        }
+    }
+}
+
+impl<P: Platform> Drop for PipelineTimer<P> {
+    fn drop(&mut self) {
+        let (Some(started), Some(now)) = (self.started, now_mono::<P>()) else {
+            return;
+        };
+        let took = now.saturating_duration_since(started);
+        timing::add_pipeline(took);
+        if took >= timing::SLOW_PIPELINE {
+            log::info!(
+                "reims-vgpu timing: {} pipeline {} took {} ms to make",
+                self.kind,
+                self.reference,
+                took.as_millis()
+            );
+        }
+    }
+}
+
 /// A compute pipeline state from `entry` and its record, registered for `reference`.
 pub(crate) fn create_compute<P: Platform, M: ManagerOps<P>>(
     hold: Hold<'_>,
@@ -225,6 +268,7 @@ pub(crate) fn create_compute<P: Platform, M: ManagerOps<P>>(
     mut cursor: Cursor,
     placement: Option<GuestPtr>,
 ) -> RaiseResult<Result<P::ComputePipeline, String>> {
+    let _timer = PipelineTimer::<P>::start("compute", reference);
     let state = match refuse!(command_type(entry, &mut cursor, "compute pipeline state")) {
         NEW_COMPUTE_PIPELINE_STATE => refuse!(new_compute_state(hold, m, &mut cursor, placement)?),
         ct => return Ok(Err(format!("unknown command type {ct}"))),
@@ -247,6 +291,7 @@ pub(crate) fn create_render<P: Platform, M: ManagerOps<P>>(
     mut cursor: Cursor,
     placement: Option<GuestPtr>,
 ) -> RaiseResult<Result<P::RenderPipeline, String>> {
+    let _timer = PipelineTimer::<P>::start("render", reference);
     let state = match refuse!(command_type(entry, &mut cursor, "render pipeline state")) {
         NEW_RENDER_PIPELINE_STATE => refuse!(new_render_state(hold, m, &mut cursor, placement)?),
         NEW_TILE_RENDER_PIPELINE_STATE => refuse!(new_tile_state(hold, m, &mut cursor)?),

@@ -22,6 +22,7 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use crate::guest::records::GuestFeatures;
 use crate::platform::Platform;
+use crate::platform::os::{Clock, MonoTime};
 use crate::raise::RaiseResult;
 use crate::resources::buffer::child::HeapBufferResource;
 use crate::resources::buffer::detach::DetachBufferResource;
@@ -555,6 +556,18 @@ pub(crate) fn platform_for<P: Platform>(task: &TaskRef<P>) -> Option<Arc<P>> {
             .iter()
             .rev()
             .find_map(|p| p.clone().downcast::<P>().ok())
+    })
+}
+
+/// The monotonic time on the innermost [`with_platform`] scope's clock, or `None` outside every
+/// scope (the slow-exec diagnostics skip their timing then).
+pub(crate) fn now_mono<P: Platform>() -> Option<MonoTime> {
+    PLATFORMS.with(|s| {
+        s.borrow()
+            .iter()
+            .rev()
+            .find_map(|p| p.clone().downcast::<P>().ok())
+            .map(|p| p.clock().now_mono())
     })
 }
 
