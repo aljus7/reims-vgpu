@@ -28,6 +28,11 @@ use crate::resources::resource::{AnyResource, Resource};
 use crate::resources::{Op, RaiseKind, raised_kind};
 use crate::rt::Hold;
 
+/// How long an empty entry the host never saw deleted is read again before its lookup fails.
+const EMPTY_ENTRY_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
+/// How many times it is read again over [`EMPTY_ENTRY_WAIT`].
+const EMPTY_ENTRY_READS: u32 = 20;
+
 /// Whether `raised` is a view a resource's kind does not have (a texture asked of a buffer, and
 /// so on): what a stale cached object answers for the object that reused its reference.
 pub(crate) fn is_wrong_kind(raised: &crate::raise::Raise) -> bool {
@@ -386,7 +391,7 @@ impl<P: Platform> ResourceManager<P> {
         if let Some(object) = self.probe::<K>(reference) {
             return Ok(Ok(Some(object)));
         }
-        let entry = match self
+        let mut entry = match self
             .object_lists
             .get_object_entry_remapping(hold, reference)
         {
@@ -394,7 +399,13 @@ impl<P: Platform> ResourceManager<P> {
             Err(e) => return Ok(Err(e)),
         };
         if entry.object_type() == 0 {
-            return Ok(self.recall_deleted::<K>(reference));
+            match self.recall_deleted::<K>(reference) {
+                Some(answer) => return Ok(answer),
+                None => match self.wait_for_entry(reference) {
+                    Some(written) => entry = written,
+                    None => return Ok(Err(format!("object {reference} has an empty entry"))),
+                },
+            }
         }
         let offset = entry.offset;
         let Some(cursor) = self.new_memory_cursor(hold, offset, u64::from(entry.length()))? else {
@@ -431,10 +442,13 @@ impl<P: Platform> ResourceManager<P> {
         }
     }
 
-    /// What an empty entry for `reference` answers: the object the guest deleted, while it is
-    /// still kept ([`Retired`]), else the empty entry's error, saying when the host saw the
-    /// delete if it did.
-    fn recall_deleted<K: ManagedKind<P>>(&self, reference: u32) -> Result<Option<K::Obj>, String> {
+    /// What an empty entry for `reference` answers when the host saw its delete: the object the
+    /// guest deleted, while it is still kept ([`Retired`]), else the empty entry's error with
+    /// the delete's age. `None` when no delete of it was seen.
+    fn recall_deleted<K: ManagedKind<P>>(
+        &self,
+        reference: u32,
+    ) -> Option<Result<Option<K::Obj>, String>> {
         let now = self.platform.clock().now_mono();
         let (recall, released) = self.with_caches(|c| {
             c.retired
@@ -450,14 +464,46 @@ impl<P: Platform> ResourceManager<P> {
                         age.as_millis()
                     );
                 }
-                Ok(Some(object))
+                Some(Ok(Some(object)))
             }
-            Recall::Released { age } => Err(format!(
+            Recall::Released { age } => Some(Err(format!(
                 "object {reference} has an empty entry (deleted {}ms ago, already released)",
                 age.as_millis()
-            )),
-            Recall::Unknown => Err(format!("object {reference} has an empty entry")),
+            ))),
+            Recall::Unknown => None,
         }
+    }
+
+    /// The entry of `reference`, never deleted as far as the host saw, read again a few times
+    /// over [`EMPTY_ENTRY_WAIT`]: an exec can reach the host while the guest still writes a new
+    /// object's entry. `None`, logged with the entry's raw words, when it stays empty.
+    fn wait_for_entry(&self, reference: u32) -> Option<ObjectEntry> {
+        let mut last = None;
+        for read in 1..=EMPTY_ENTRY_READS {
+            // Real time: the guest writes on its own vCPU, whatever the platform's clock
+            std::thread::sleep(EMPTY_ENTRY_WAIT / EMPTY_ENTRY_READS);
+            let Ok(entry) = self.object_lists.get_object_entry(reference) else {
+                break;
+            };
+            if entry.object_type() != 0 {
+                log::warn!(
+                    "object {reference} had an empty entry; it appeared after {read} re-reads \
+                     (~{}ms)",
+                    (EMPTY_ENTRY_WAIT / EMPTY_ENTRY_READS * read).as_millis()
+                );
+                return Some(entry);
+            }
+            last = Some(entry);
+        }
+        if let Some(entry) = last {
+            let (raw, offset) = (entry.type_and_length, entry.offset);
+            log::warn!(
+                "object {reference} has an empty entry, never deleted as the host saw, still \
+                 empty after {}ms: type/length word {raw:#x}, offset {offset:#x}",
+                EMPTY_ENTRY_WAIT.as_millis()
+            );
+        }
+        None
     }
 
     /// Releases the object cached for `reference` under the creation lock, then clears its
@@ -1202,6 +1248,44 @@ mod tests {
             fx.write(OL + 12, &[0u8; 12]);
             let r = fx.m.get_object::<TestKind>(Hold::NONE, 1).unwrap();
             assert_eq!(r.err().unwrap(), "object 1 has an empty entry");
+        }
+
+        /// An entry the guest writes while the lookup waits makes its object.
+        #[test]
+        fn an_entry_written_during_the_wait_makes_its_object() {
+            let fx = Fx::new(&[(0, 0, 0), (0, 0, 0)], Placement::Off);
+            fx.next_cursor(0, 0x20);
+            let written = ObjectEntry {
+                type_and_length: 6 | (0x20 << 8),
+                offset: REC,
+            };
+            let (got, logs) = std::thread::scope(|s| {
+                s.spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(3));
+                    assert!(fx.region.write(OL + 12, written.as_bytes()));
+                });
+                fx.logged(|| fx.m.get_object::<TestKind>(Hold::NONE, 1))
+            });
+            assert!(got.unwrap().unwrap().is_some());
+            assert_eq!(seen().len(), 1);
+            assert!(
+                logs.iter()
+                    .any(|l| l.contains("object 1 had an empty entry; it appeared")),
+                "{logs:?}"
+            );
+        }
+
+        /// An entry still empty after the wait fails, logged with its raw words.
+        #[test]
+        fn an_entry_still_empty_is_logged_with_its_words() {
+            let fx = Fx::new(&[(0, 0, 0), (0, 0, 0x5000)], Placement::Off);
+            let (got, logs) = fx.logged(|| fx.m.get_object::<TestKind>(Hold::NONE, 1));
+            assert_eq!(got.unwrap().err().unwrap(), "object 1 has an empty entry");
+            assert!(
+                logs.iter()
+                    .any(|l| l.contains("still empty after 20ms") && l.contains("offset 0x5000")),
+                "{logs:?}"
+            );
         }
 
         /// A delete with nothing cached is remembered, so the empty entry says so.
