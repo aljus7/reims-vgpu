@@ -257,7 +257,7 @@ impl<P: Platform> TaskCore<P> {
     pub fn delete_resource(&self, hold: Hold<'_>, resource: u32) -> RaiseResult<()> {
         let _lock = self.mutex.write();
         self.live_manager()
-            .delete_object::<Resources>(hold, resource, true);
+            .retire_object::<Resources>(hold, resource, true);
         Ok(())
     }
 

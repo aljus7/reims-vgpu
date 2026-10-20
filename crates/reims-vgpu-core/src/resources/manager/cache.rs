@@ -5,6 +5,7 @@
 //! object. A creator may look up other references (re-entering the lock) and is never checked
 //! for cycles.
 
+use std::any::TypeId;
 use std::sync::Arc;
 
 use crate::collections::{ListOrderMap, LookupMap};
@@ -13,9 +14,11 @@ use crate::guest::records::ObjectEntry;
 use crate::host::HostPtr;
 use crate::memory::cursor::Cursor;
 use crate::platform::Platform;
+use crate::platform::os::Clock;
 use crate::raise::RaiseResult;
 use crate::resources::manager::create::Resources;
 use crate::resources::manager::records::word;
+use crate::resources::manager::retired::{Recall, Retired};
 use crate::resources::manager::states::{
     ComputePipelineStates, DepthStencilStates, Fences, Functions, RasterizationRateMaps,
     RenderPipelineStates, SamplerStates,
@@ -101,6 +104,8 @@ pub struct Caches<P: Platform> {
     gpu_addresses: GpuAddresses,
     /// Registered pipeline identifiers and their references.
     pipelines: LookupMap<u64, u32>,
+    /// The objects the guest deleted, kept for an exec that still names them.
+    pub(crate) retired: Retired,
 }
 
 /// The GPU-address registry: its only query is the greatest registered address at or below an
@@ -125,6 +130,7 @@ impl<P: Platform> Caches<P> {
             resources: Cache::default(),
             gpu_addresses: GpuAddresses::default(),
             pipelines: LookupMap::new(),
+            retired: Retired::default(),
         }
     }
 
@@ -334,7 +340,10 @@ impl<P: Platform> ResourceManager<P> {
             Some(cached) if !Arc::ptr_eq(&cached, stale) => return Ok(Some(cached)),
             _ => {}
         }
-        let Ok(entry) = self.object_lists.get_object_entry_remapping(hold, reference) else {
+        let Ok(entry) = self
+            .object_lists
+            .get_object_entry_remapping(hold, reference)
+        else {
             return Ok(None);
         };
         let object_type = entry.object_type();
@@ -377,12 +386,15 @@ impl<P: Platform> ResourceManager<P> {
         if let Some(object) = self.probe::<K>(reference) {
             return Ok(Ok(Some(object)));
         }
-        let entry = match self.object_lists.get_object_entry_remapping(hold, reference) {
+        let entry = match self
+            .object_lists
+            .get_object_entry_remapping(hold, reference)
+        {
             Ok(entry) => entry,
             Err(e) => return Ok(Err(e)),
         };
         if entry.object_type() == 0 {
-            return Ok(Err(format!("object {reference} has an empty entry")));
+            return Ok(self.recall_deleted::<K>(reference));
         }
         let offset = entry.offset;
         let Some(cursor) = self.new_memory_cursor(hold, offset, u64::from(entry.length()))? else {
@@ -419,6 +431,35 @@ impl<P: Platform> ResourceManager<P> {
         }
     }
 
+    /// What an empty entry for `reference` answers: the object the guest deleted, while it is
+    /// still kept ([`Retired`]), else the empty entry's error, saying when the host saw the
+    /// delete if it did.
+    fn recall_deleted<K: ManagedKind<P>>(&self, reference: u32) -> Result<Option<K::Obj>, String> {
+        let now = self.platform.clock().now_mono();
+        let (recall, released) = self.with_caches(|c| {
+            c.retired
+                .recall::<K::Obj>(TypeId::of::<K>(), reference, now, K::retain)
+        });
+        drop(released);
+        match recall {
+            Recall::Kept { object, age, first } => {
+                if first {
+                    log::warn!(
+                        "object {reference} has an empty entry: using the object the guest \
+                         deleted {}ms ago",
+                        age.as_millis()
+                    );
+                }
+                Ok(Some(object))
+            }
+            Recall::Released { age } => Err(format!(
+                "object {reference} has an empty entry (deleted {}ms ago, already released)",
+                age.as_millis()
+            )),
+            Recall::Unknown => Err(format!("object {reference} has an empty entry")),
+        }
+    }
+
     /// Releases the object cached for `reference` under the creation lock, then clears its
     /// placement slot if asked.
     pub fn delete_object<K: ManagedKind<P>>(
@@ -435,6 +476,30 @@ impl<P: Platform> ResourceManager<P> {
         }
     }
 
+    /// The guest's delete (opcodes 37 and 40): as [`Self::delete_object`], except that the
+    /// object moves to the retired objects instead of being released, for an exec still naming
+    /// it ([`Self::recall_deleted`]); a delete with nothing cached is remembered too. What the
+    /// retired objects let go of is released outside the leaf lock.
+    pub fn retire_object<K: ManagedKind<P>>(
+        &self,
+        hold: Hold<'_>,
+        reference: u32,
+        clear_placement: bool,
+    ) {
+        let _creation = self.creation.lock();
+        let now = self.platform.clock().now_mono();
+        let resource = TypeId::of::<K>() == TypeId::of::<Resources>();
+        let released = self.with_caches(|c| {
+            let removed = K::sub_manager_mut(c).remove(reference);
+            c.retired
+                .retire(TypeId::of::<K>(), reference, removed, resource, now)
+        });
+        drop(released);
+        if clear_placement {
+            self.clear_placement_list_entry(hold, reference);
+        }
+    }
+
     /// The guest's serialized delete (opcode 40): the operation word at 0 and the reference at
     /// 8. A short command, or an operation that deletes nothing, is `false`.
     pub fn delete_serialized_object(&self, hold: Hold<'_>, command: &[u8]) -> bool {
@@ -446,20 +511,20 @@ impl<P: Platform> ResourceManager<P> {
             return false;
         };
         match deletion {
-            Deletion::Resource => self.delete_object::<Resources>(hold, reference, true),
+            Deletion::Resource => self.retire_object::<Resources>(hold, reference, true),
             Deletion::DepthStencil => {
-                self.delete_object::<DepthStencilStates>(hold, reference, true)
+                self.retire_object::<DepthStencilStates>(hold, reference, true)
             }
-            Deletion::Sampler => self.delete_object::<SamplerStates>(hold, reference, true),
-            Deletion::Function => self.delete_object::<Functions>(hold, reference, true),
+            Deletion::Sampler => self.retire_object::<SamplerStates>(hold, reference, true),
+            Deletion::Function => self.retire_object::<Functions>(hold, reference, true),
             Deletion::ComputePipeline => {
-                self.delete_object::<ComputePipelineStates>(hold, reference, true)
+                self.retire_object::<ComputePipelineStates>(hold, reference, true)
             }
             Deletion::RenderPipeline => {
-                self.delete_object::<RenderPipelineStates>(hold, reference, true)
+                self.retire_object::<RenderPipelineStates>(hold, reference, true)
             }
-            Deletion::Fence => self.delete_object::<Fences>(hold, reference, true),
-            Deletion::RateMap => self.delete_object::<RasterizationRateMaps>(hold, reference, true),
+            Deletion::Fence => self.retire_object::<Fences>(hold, reference, true),
+            Deletion::RateMap => self.retire_object::<RasterizationRateMaps>(hold, reference, true),
         }
         true
     }
@@ -728,11 +793,10 @@ mod tests {
             let stale = private_buffer(&env);
             let fresh = texture_resource(&fx);
             assert!(fx.m.register_object::<Resources>(1, Arc::clone(&fresh)));
-            let got = fx
-                .m
-                .refresh_stale_resource(Hold::NONE, 1, &stale)
-                .unwrap()
-                .unwrap();
+            let got =
+                fx.m.refresh_stale_resource(Hold::NONE, 1, &stale)
+                    .unwrap()
+                    .unwrap();
             assert!(Arc::ptr_eq(&got, &fresh));
             assert!(Arc::ptr_eq(&cached(&fx, 1).unwrap(), &fresh));
         }
@@ -1057,6 +1121,111 @@ mod tests {
             assert!(fx.m.get_existing_object::<TestKind>(1).is_none());
             assert_eq!(f.obj().handle_count(), 1);
             assert_eq!(fx.placement(1), (0x1234, 0x5678));
+        }
+
+        /// The guest's delete keeps the object among the retired ones.
+        #[test]
+        fn a_retire_erases_and_keeps_without_clearing() {
+            let fx = Fx::new(&entries3(), Placement::Mapped);
+            fx.set_placement(1, 0x1234, 0x5678);
+            let f = fence(&fx);
+            assert!(fx.m.register_object::<TestKind>(1, f.clone_ref()));
+            fx.m.retire_object::<TestKind>(Hold::NONE, 1, false);
+            assert!(fx.m.get_existing_object::<TestKind>(1).is_none());
+            // `f` and the retired objects'
+            assert_eq!(f.obj().handle_count(), 2);
+            assert_eq!(fx.m.with_caches(|c| c.retired.kept()), 1);
+            assert_eq!(fx.placement(1), (0x1234, 0x5678));
+        }
+
+        /// A delete that is not the guest's (a discard, a backing's removal) keeps nothing.
+        #[test]
+        fn a_plain_delete_keeps_nothing() {
+            let fx = Fx::new(&entries3(), Placement::Mapped);
+            let f = fence(&fx);
+            assert!(fx.m.register_object::<TestKind>(1, f.clone_ref()));
+            fx.m.delete_object::<TestKind>(Hold::NONE, 1, true);
+            fx.write(OL + 12, &[0u8; 12]);
+            let r = fx.m.get_object::<TestKind>(Hold::NONE, 1).unwrap();
+            assert_eq!(r.err().unwrap(), "object 1 has an empty entry");
+        }
+
+        /// The guest emptied the entry of an object it deleted: an exec still naming it gets
+        /// the deleted object.
+        #[test]
+        fn an_empty_entry_recalls_the_deleted_object() {
+            let fx = Fx::new(&entries3(), Placement::Mapped);
+            let f = fence(&fx);
+            assert!(fx.m.register_object::<TestKind>(1, f.clone_ref()));
+            fx.m.retire_object::<TestKind>(Hold::NONE, 1, true);
+            fx.write(OL + 12, &[0u8; 12]);
+            let (got, logs) = fx.logged(|| fx.m.get_object::<TestKind>(Hold::NONE, 1));
+            let got = got.unwrap().unwrap().unwrap();
+            assert_eq!(got.id(), f.id());
+            assert!(fx.m.get_existing_object::<TestKind>(1).is_none());
+            assert!(
+                logs.iter()
+                    .any(|l| l.contains("object 1 has an empty entry: using the object")),
+                "{logs:?}"
+            );
+            // Logged once per deleted object
+            let (_, again) = fx.logged(|| fx.m.get_object::<TestKind>(Hold::NONE, 1));
+            assert!(!again.iter().any(|l| l.contains("using the object")));
+            assert!(seen().is_empty());
+        }
+
+        /// Only an empty entry recalls: a reference the guest reused makes its new object.
+        #[test]
+        fn a_reused_reference_makes_its_new_object() {
+            let fx = Fx::new(&entries3(), Placement::Mapped);
+            let f = fence(&fx);
+            assert!(fx.m.register_object::<TestKind>(1, f.clone_ref()));
+            fx.m.retire_object::<TestKind>(Hold::NONE, 1, false);
+            fx.next_cursor(0, 0x20);
+            let got =
+                fx.m.get_object::<TestKind>(Hold::NONE, 1)
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            assert_ne!(got.id(), f.id());
+            assert_eq!(seen().len(), 1);
+        }
+
+        /// Another kind's delete of the reference is not recalled.
+        #[test]
+        fn another_kinds_delete_is_not_recalled() {
+            let fx = Fx::new(&entries3(), Placement::Mapped);
+            let world = fx.platform.world();
+            let o = world.new_obj::<kind::Fence>(Default::default());
+            assert!(fx.m.register_object::<Fences>(1, o));
+            fx.m.retire_object::<Fences>(Hold::NONE, 1, false);
+            fx.write(OL + 12, &[0u8; 12]);
+            let r = fx.m.get_object::<TestKind>(Hold::NONE, 1).unwrap();
+            assert_eq!(r.err().unwrap(), "object 1 has an empty entry");
+        }
+
+        /// A delete with nothing cached is remembered, so the empty entry says so.
+        #[test]
+        fn an_empty_entry_names_a_delete_with_nothing_kept() {
+            let fx = Fx::new(&entries3(), Placement::Mapped);
+            fx.m.retire_object::<TestKind>(Hold::NONE, 1, false);
+            fx.write(OL + 12, &[0u8; 12]);
+            let r = fx.m.get_object::<TestKind>(Hold::NONE, 1).unwrap();
+            assert_eq!(
+                r.err().unwrap(),
+                "object 1 has an empty entry (deleted 0ms ago, already released)"
+            );
+        }
+
+        #[test]
+        fn the_managers_drop_releases_the_retired_objects() {
+            let fx = Fx::new(&entries3(), Placement::Mapped);
+            let f = fence(&fx);
+            assert!(fx.m.register_object::<TestKind>(1, f.clone_ref()));
+            fx.m.retire_object::<TestKind>(Hold::NONE, 1, false);
+            assert_eq!(f.obj().handle_count(), 2);
+            drop(fx);
+            assert_eq!(f.obj().handle_count(), 1);
         }
 
         /// A delete that clears zeroes all 16 bytes.

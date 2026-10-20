@@ -51,6 +51,7 @@ pub mod lookup;
 pub mod records;
 pub mod reserve;
 pub mod resolver;
+pub mod retired;
 pub mod states;
 pub mod texture;
 
@@ -355,10 +356,11 @@ impl<P: Platform> ResourceManager<P> {
 }
 
 impl<P: Platform> Drop for ResourceManager<P> {
-    /// The caches release in a fixed order, each in its list order: every cache but the
-    /// functions, then the lookup, then the functions.
+    /// The caches release in a fixed order, each in its list order: the retired objects, every
+    /// cache but the functions, then the lookup, then the functions.
     fn drop(&mut self) {
         let caches = self.caches.get_mut();
+        drop(caches.retired.drain());
         drop(caches.sampler_states.drain());
         drop(caches.depth_stencil_states.drain());
         drop(caches.render_pipeline_states.drain());
