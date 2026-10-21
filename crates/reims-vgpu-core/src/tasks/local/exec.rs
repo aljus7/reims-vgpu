@@ -136,6 +136,11 @@ impl<P: Platform> LocalTask<P> {
         // Where the paging buffer was made and its waits encoded, and where its blits and
         // dispatches were encoded: the GPU paging's legs, for the timing line
         let (mut made, mut encoded) = (looked_up, looked_up);
+        // The blit encoder's creation, the slowest blit prepare (its time, kind and whether it
+        // was volatile, which devolatilizes it) and the volatile ones, for the timing line
+        let mut blit_open = Duration::ZERO;
+        let mut slowest_blit = (Duration::ZERO, "none", false);
+        let mut volatile_blits = 0u32;
         if !blit_resources.is_empty() || !compute_resources.is_empty() {
             let command_buffer = match &self.base.paging_queue {
                 Some(queue) => queue.command_buffer(OnFault::Return)?,
@@ -152,12 +157,21 @@ impl<P: Platform> LocalTask<P> {
             let mut compute_encoder: Option<P::ComputeEncoder> = None;
             let mut prepared = (|| -> RaiseResult<_> {
                 if !blit_resources.is_empty() {
+                    let opening = now();
                     blit_encoder = match &command_buffer {
                         Some(buffer) => buffer.blit_encoder(OnFault::Return)?,
                         None => None,
                     };
+                    blit_open = now().saturating_duration_since(opening);
                     for r in &blit_resources {
+                        let volatile = timed && r.state.is_volatile();
+                        let paging = now();
                         r.prepare_in_encoder(hold, blit_encoder.as_ref())?;
+                        let paged = now().saturating_duration_since(paging);
+                        volatile_blits = volatile_blits.saturating_add(u32::from(volatile));
+                        if paged > slowest_blit.0 {
+                            slowest_blit = (paged, r.kind_name(), volatile);
+                        }
                     }
                     if let Some(encoder) = &blit_encoder {
                         encoder.encode(OnFault::Return, BlitCmd::EndEncoding)?;
@@ -265,7 +279,8 @@ impl<P: Platform> LocalTask<P> {
             log::info!(
                 "reims-vgpu timing: task {}: a prepare took {} ms: lock wait {} ms, lookups {} ms \
                  (slowest {} ms, resource {}), GPU paging {} ms ({} blit, {} compute; make {} ms, \
-                 encode {} ms, commit {} ms; {} page buffers: map {} ms, make {} ms), CPU paging \
+                 encode {} ms, commit {} ms; {} page buffers: map {} ms, make {} ms; blit encoder \
+                 {} ms, slowest blit prepare {} ms, a {} (volatile {}), {} volatile), CPU paging \
                  {} ms ({} resources; slowest {} ms, a {}), invalidation {} ms",
                 self.task_id,
                 timing::millis(waiting, finished),
@@ -282,6 +297,11 @@ impl<P: Platform> LocalTask<P> {
                 page_buffers,
                 page_map.as_millis(),
                 page_make.as_millis(),
+                blit_open.as_millis(),
+                slowest_blit.0.as_millis(),
+                slowest_blit.1,
+                slowest_blit.2,
+                volatile_blits,
                 timing::millis(gpu_paged, cpu_paged),
                 cpu_resources.len(),
                 slowest_cpu.0.as_millis(),
