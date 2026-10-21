@@ -84,6 +84,9 @@ impl<P: Platform> LocalTask<P> {
         let waiting = now();
         let _prepare = self.prepare_mutex.lock();
         let started = now();
+        if timed {
+            let _ = timing::take_page_buffers();
+        }
         let mut sync = PrepareSync::<P> {
             needs_sync: false,
             needs_complete: false,
@@ -255,13 +258,14 @@ impl<P: Platform> LocalTask<P> {
         }
         let finished = now();
         if finished.saturating_duration_since(waiting) >= timing::SLOW_EXEC {
+            let (page_buffers, page_map, page_make) = timing::take_page_buffers();
             let slowest_cpu_kind = cpu_resources
                 .get(slowest_cpu.1)
                 .map_or("none", |r| r.kind_name());
             log::info!(
                 "reims-vgpu timing: task {}: a prepare took {} ms: lock wait {} ms, lookups {} ms \
                  (slowest {} ms, resource {}), GPU paging {} ms ({} blit, {} compute; make {} ms, \
-                 encode {} ms, commit {} ms), CPU paging \
+                 encode {} ms, commit {} ms; {} page buffers: map {} ms, make {} ms), CPU paging \
                  {} ms ({} resources; slowest {} ms, a {}), invalidation {} ms",
                 self.task_id,
                 timing::millis(waiting, finished),
@@ -275,6 +279,9 @@ impl<P: Platform> LocalTask<P> {
                 timing::millis(looked_up, made),
                 timing::millis(made, encoded),
                 timing::millis(encoded, gpu_paged),
+                page_buffers,
+                page_map.as_millis(),
+                page_make.as_millis(),
                 timing::millis(gpu_paged, cpu_paged),
                 cpu_resources.len(),
                 slowest_cpu.0.as_millis(),

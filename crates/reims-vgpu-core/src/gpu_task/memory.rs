@@ -27,6 +27,7 @@ use crate::memory::mapping::Mapping;
 use crate::num::{ToU64, ToUsize};
 use crate::platform::Platform;
 use crate::platform::device::GpuDevice;
+use crate::platform::os::Clock as _;
 use crate::platform::types::ResourceAddressRange;
 use crate::raise::{Kept, keep_forever};
 use crate::raise::{OnFault, RaiseResult};
@@ -489,12 +490,17 @@ impl<P: Platform> GpuTask<P> {
         page: u32,
         length: u64,
     ) -> RaiseResult<P::Buffer> {
+        let timed = crate::timing::enabled();
+        let clock = self.platform.clock();
+        let now = || timed.then(|| clock.now_mono());
+        let started = now();
         let mapping = self.new_virtual_mapping(
             hold,
             u64::from(page).wrapping_shl(APV_PAGE_SHIFT),
             length,
             false,
         )?;
+        let mapped = now();
         let Some(mapping) = mapping else {
             return raise_caught(
                 RaiseKind::NoBufferMapping,
@@ -513,6 +519,12 @@ impl<P: Platform> GpuTask<P> {
             );
         };
         let buffer = Self::no_copy_buffer(&device, address, length, mapping)?;
+        if let (Some(started), Some(mapped), Some(made)) = (started, mapped, now()) {
+            crate::timing::add_page_buffer(
+                mapped.saturating_duration_since(started),
+                made.saturating_duration_since(mapped),
+            );
+        }
         let Some(buffer) = buffer else {
             // Metal released the deallocator's reference; the kept one stays
             keep_forever(kept, Kept::AddressSpace);

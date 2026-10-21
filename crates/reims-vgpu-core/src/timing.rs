@@ -18,6 +18,34 @@ thread_local! {
     /// The pipeline creations on this thread since the last [`take_pipelines`]: their count
     /// and their total nanoseconds.
     static PIPELINES: Cell<(u32, u64)> = const { Cell::new((0, 0)) };
+    /// The buffers made over guest pages on this thread since the last [`take_page_buffers`]:
+    /// their count, and the total nanoseconds of mapping the pages and of making the buffers.
+    static PAGE_BUFFERS: Cell<(u32, u64, u64)> = const { Cell::new((0, 0, 0)) };
+}
+
+/// Records one buffer made over guest pages on this thread: `map` mapping the pages, `buffer`
+/// making the buffer over them.
+pub fn add_page_buffer(map: Duration, buffer: Duration) {
+    let nanos = |d: Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+    PAGE_BUFFERS.with(|p| {
+        let (count, mapped, made) = p.get();
+        p.set((
+            count.saturating_add(1),
+            mapped.saturating_add(nanos(map)),
+            made.saturating_add(nanos(buffer)),
+        ));
+    });
+}
+
+/// The buffers made over guest pages on this thread since the last call, the total time mapping
+/// their pages and making them; the record restarts.
+pub fn take_page_buffers() -> (u32, Duration, Duration) {
+    let (count, mapped, made) = PAGE_BUFFERS.with(|p| p.replace((0, 0, 0)));
+    (
+        count,
+        Duration::from_nanos(mapped),
+        Duration::from_nanos(made),
+    )
 }
 
 /// Whether the timings are taken at all: only when info lines go somewhere (`REIMS_VGPU_LOG`, or
@@ -67,6 +95,18 @@ mod tests {
         let other = std::thread::scope(|s| s.spawn(take_pipelines).join().unwrap());
         assert_eq!(other, (0, Duration::ZERO));
         assert_eq!(take_pipelines(), (1, Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn page_buffers_add_up_and_restart() {
+        let _ = take_page_buffers();
+        add_page_buffer(Duration::from_millis(3), Duration::from_millis(5));
+        add_page_buffer(Duration::from_millis(4), Duration::from_millis(1));
+        assert_eq!(
+            take_page_buffers(),
+            (2, Duration::from_millis(7), Duration::from_millis(6))
+        );
+        assert_eq!(take_page_buffers(), (0, Duration::ZERO, Duration::ZERO));
     }
 
     #[test]
