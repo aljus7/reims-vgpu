@@ -1,6 +1,7 @@
 //! Shared section views over Windows placeholders. A remap aliases pages; it never copies them.
 
 use super::api::*;
+use crate::gpu::timing::{self, VmCall};
 use crate::os::backing::{self as files, Backing, Piece, Registration};
 use reims_vgpu_core::host::HostPtr;
 use reims_vgpu_core::num::{ToU64, ToUsize};
@@ -120,7 +121,7 @@ fn reserve(length: u64) -> Result<u64, KernReturn> {
 fn map(first: u64, length: u64, backing: &Backing, prot: i32) -> Result<(), KernReturn> {
     // SAFETY: the exact placeholder is replaced with a view of a retained section. This flag
     // permits page-aligned offsets and addresses, including the guest's 4 KiB pages.
-    let mapped = unsafe {
+    let mapped = timing::vm_call(VmCall::Map, length, || unsafe {
         MapViewOfFile3(
             backing.file.as_raw_handle(),
             GetCurrentProcess(),
@@ -132,7 +133,7 @@ fn map(first: u64, length: u64, backing: &Backing, prot: i32) -> Result<(), Kern
             std::ptr::null(),
             0,
         )
-    };
+    });
     if mapped != ptr(first) {
         Err(error("MapViewOfFile3", NO_SPACE))
     } else {
@@ -141,19 +142,22 @@ fn map(first: u64, length: u64, backing: &Backing, prot: i32) -> Result<(), Kern
 }
 fn unmap(first: u64) {
     // SAFETY: a view owned by this table, restored to its placeholder.
-    if unsafe { UnmapViewOfFile2(GetCurrentProcess(), ptr(first), MEM_PRESERVE_PLACEHOLDER) } == 0 {
+    if timing::vm_call(VmCall::Unmap, 0, || unsafe {
+        UnmapViewOfFile2(GetCurrentProcess(), ptr(first), MEM_PRESERVE_PLACEHOLDER)
+    }) == 0
+    {
         cannot_restore("UnmapViewOfFile2");
     }
 }
 fn split_placeholder(first: u64, length: u64) -> Result<(), KernReturn> {
     // SAFETY: splits an existing placeholder; it does not free the address range.
-    if unsafe {
+    if timing::vm_call(VmCall::Placeholder, length, || unsafe {
         VirtualFree(
             ptr(first),
             length.to_usize(),
             MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER,
         )
-    } == 0
+    }) == 0
     {
         Err(error("VirtualFree split placeholder", INVALID_ADDRESS))
     } else {
@@ -162,13 +166,13 @@ fn split_placeholder(first: u64, length: u64) -> Result<(), KernReturn> {
 }
 fn coalesce(first: u64, length: u64) {
     // SAFETY: adjacent placeholders created while replacing this owned range.
-    if unsafe {
+    if timing::vm_call(VmCall::Placeholder, length, || unsafe {
         VirtualFree(
             ptr(first),
             length.to_usize(),
             MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS,
         )
-    } == 0
+    }) == 0
     {
         cannot_restore("VirtualFree coalesce placeholders");
     }
@@ -248,7 +252,7 @@ fn split(views: &mut BTreeMap<u64, View>, at: u64) -> Result<(), KernReturn> {
 
 fn replace(first: u64, length: u64, new: &[Piece]) -> Result<(), KernReturn> {
     let end = first.checked_add(length).ok_or(INVALID_ARGUMENT)?;
-    let mut views = VIEWS.lock();
+    let mut views = timing::vm_lock(|| VIEWS.lock());
     let mut at = first;
     while at < end {
         let Some((&base, view)) = views.range(..=at).next_back() else {
@@ -318,7 +322,7 @@ fn allocate(length: u64) -> Result<HostAddr, KernReturn> {
         unsafe { VirtualFree(ptr(first), 0, MEM_RELEASE) };
         return Err(kr);
     }
-    VIEWS.lock().insert(
+    timing::vm_lock(|| VIEWS.lock()).insert(
         first,
         View {
             length,
@@ -510,7 +514,7 @@ impl HostVm for WindowsVm {
             return Ok(());
         }
         let end = first.checked_add(length).ok_or(INVALID_ARGUMENT)?;
-        let mut views = VIEWS.lock();
+        let mut views = timing::vm_lock(|| VIEWS.lock());
         split(&mut views, first)?;
         split(&mut views, end)?;
         let mut at = first;
@@ -557,7 +561,7 @@ impl HostVm for WindowsVm {
             return INVALID_ARGUMENT;
         }
         let end = first + length;
-        let mut views = VIEWS.lock();
+        let mut views = timing::vm_lock(|| VIEWS.lock());
         if split(&mut views, first).is_err() || split(&mut views, end).is_err() {
             return INVALID_ADDRESS;
         }
@@ -583,7 +587,10 @@ impl HostVm for WindowsVm {
                 coalesce(run, run_length);
             }
             // SAFETY: releases the exact owned placeholder after its views are gone.
-            if unsafe { VirtualFree(ptr(run), 0, MEM_RELEASE) } == 0 {
+            if timing::vm_call(VmCall::Placeholder, run_length, || unsafe {
+                VirtualFree(ptr(run), 0, MEM_RELEASE)
+            }) == 0
+            {
                 cannot_restore("VirtualFree release placeholder");
             }
             for (base, _) in &spans[i..i + count] {

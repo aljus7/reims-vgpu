@@ -172,6 +172,97 @@ pub fn import<T>(length: u64, make: impl FnOnce() -> T) -> T {
     made
 }
 
+/// A host VM call (a view's map or unmap, a placeholder's split, coalesce or release) or a wait
+/// for the views' lock that takes this long or longer is written ([`vm_call`], [`vm_lock`]).
+pub const SLOW_VM_CALL: Duration = Duration::from_millis(20);
+
+/// The host VM calls and views' lock waits since the last leak line: count, total and most of
+/// each, maps, unmaps, placeholder calls and lock waits in that order.
+static VM_CALLS: Mutex<[(u64, Duration, Duration); 4]> =
+    Mutex::new([(0, Duration::ZERO, Duration::ZERO); 4]);
+
+/// The kinds [`vm_call`] counts.
+#[derive(Clone, Copy, Debug)]
+pub enum VmCall {
+    /// A section view's map.
+    Map,
+    /// A section view's unmap.
+    Unmap,
+    /// A placeholder's split, coalesce or release.
+    Placeholder,
+}
+
+fn add_vm(slot: usize, took: Duration) {
+    let mut calls = VM_CALLS.lock();
+    if let Some(entry) = calls.get_mut(slot) {
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = entry.1.saturating_add(took);
+        entry.2 = entry.2.max(took);
+    }
+}
+
+/// Runs a host VM call (`call`) and, with [`imports_on`], adds its time to the next leak line and
+/// writes one that took [`SLOW_VM_CALL`] or more. With them off it reads no clock.
+pub fn vm_call<T>(kind: VmCall, length: u64, call: impl FnOnce() -> T) -> T {
+    if !imports_on() {
+        return call();
+    }
+    let start = now();
+    let made = call();
+    let took = elapsed_since(start);
+    if took >= SLOW_VM_CALL {
+        log::info!(
+            "reims-vgpu timing: a host {kind:?} call over {length} bytes took {:.1} ms",
+            ms(took)
+        );
+    }
+    let slot = match kind {
+        VmCall::Map => 0,
+        VmCall::Unmap => 1,
+        VmCall::Placeholder => 2,
+    };
+    add_vm(slot, took);
+    made
+}
+
+/// Takes the views' lock (`lock`) and, with [`imports_on`], adds the wait to the next leak line
+/// and writes one of [`SLOW_VM_CALL`] or more. With them off it reads no clock.
+pub fn vm_lock<T>(lock: impl FnOnce() -> T) -> T {
+    if !imports_on() {
+        return lock();
+    }
+    let start = now();
+    let guard = lock();
+    let took = elapsed_since(start);
+    if took >= SLOW_VM_CALL {
+        log::info!(
+            "reims-vgpu timing: a wait for the host views' lock took {:.1} ms",
+            ms(took)
+        );
+    }
+    add_vm(3, took);
+    guard
+}
+
+fn vm_summary() -> String {
+    let calls = std::mem::take(&mut *VM_CALLS.lock());
+    let mut out = String::new();
+    for ((count, total, most), name) in
+        calls
+            .iter()
+            .zip(["maps", "unmaps", "placeholder calls", "lock waits"])
+    {
+        let n = u32::try_from((*count).max(1)).unwrap_or(u32::MAX);
+        out.push_str(&format!(
+            "; {count} {name} avg {:.2} ms max {:.1} ms total {:.0} ms",
+            ms(*total / n),
+            ms(*most),
+            ms(*total)
+        ));
+    }
+    out
+}
+
 /// The leak line of `span`, which lasted `elapsed`.
 fn leak_line(span: &ImportSpan, elapsed: Duration) -> String {
     let (live, live_bytes) = crate::remap::live_imports();
@@ -187,7 +278,7 @@ fn leak_line(span: &ImportSpan, elapsed: Duration) -> String {
         "reims-vgpu leaks: imports live {live} ({} MiB), holds {holds}, waiting unmaps {waiting} \
          ({} MiB), twins {twins} ({} MiB), buffers+heaps {}, textures {}, kept {kept:?}; \
          last {:.1} s: {} imports, {} MiB, import avg {:.2} ms max {:.1} ms, twin avg {:.2} ms \
-         max {:.1} ms",
+         max {:.1} ms{}",
         live_bytes >> 20,
         waiting_bytes >> 20,
         twin_bytes >> 20,
@@ -200,6 +291,7 @@ fn leak_line(span: &ImportSpan, elapsed: Duration) -> String {
         ms(span.import_most),
         ms(span.twin_total / n32),
         ms(span.twin_most),
+        vm_summary(),
     )
 }
 

@@ -372,3 +372,31 @@ driver. Not measured yet: `gpu::timing::import` now logs any no-copy buffer
 import of 10 ms or more with the imports live and their MiB
 (`remap::live_imports`). The next measuring soak should show whether import
 time grows with the live count.
+
+### Gradual slowness: host section-view churn under one lock (2026-10-21)
+
+Soaks 7-9 (Maps, Photos, Music, Calendar, Notes, Reminders, Contacts, Podcasts plus three
+Finder windows per round, debug build) reproduce the stalls: rounds of about 103 s, with
+134-177 s rounds mixed in. Measured in debug runs (`REIMS_DEBUG=1`):
+
+- **12-30 s stalls share one blocker.** A guest delete's release of retired objects and a
+  concurrent resource creation took the same 12.7 s, 19.3 s and 30.5 s (`delete of object ...
+  releasing N retired objects`, `... to look up: ... make`), with no core lock wait. Creation's
+  time is in the local task's page buffers (`page buffers: map 19291 ms`).
+- **That blocker is the Windows host VM's views lock.** Stack samples show one thread inside
+  `MapViewOfFile3` or `UnmapViewOfFile2` (`os/windows/vm.rs`, `replace`/`deallocate`) holding
+  `VIEWS`, while the other GPU threads park on `VIEWS` in `protect_max` and the like. The new
+  timing (`gpu::timing::vm_call`/`vm_lock`, added to every leak line) measured waits for that
+  lock of up to 17.9 s.
+- **Churn.** Every no-copy buffer over a task's pages (`new_range_mapping`) creates a throwaway
+  section of its whole length, maps it, unmaps it again, then maps one view per run of guest
+  pages, often 4 KiB each. That adds up to 5,000-340,000 view maps and as many unmaps every 10 s.
+- **The calls themselves turn slow in phases, not linearly.** Normally a view map costs about
+  2 us; in some 10 s windows it costs 300-1,400 us each and single 4 KiB maps or unmaps take
+  2.0-2.5 s. With the lock held across each call, one slow kernel call stops every GPU thread.
+  What makes the kernel calls slow is not measured (no ETW without admin); stack samples show
+  no other thread in a VM call at those moments.
+
+Open: cut the per-page view churn (keep a paged texture's mapping across prepares, reserve a
+placeholder instead of a throwaway section), and stop holding `VIEWS` across kernel calls. Neither
+is implemented or measured yet.
