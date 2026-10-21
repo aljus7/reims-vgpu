@@ -1310,11 +1310,13 @@ impl CommandBuffer<VulkanPlatform> for VulkanCommandBuffer {
     /// refuses them. Its creation ends the exact `uniqueIdentifier` of later indirect command
     /// buffers ([`crate::gpu::icb::encoder_made`]), as every encoder creator's does.
     fn blit_encoder(&self, _on: OnFault) -> RaiseResult<Option<VulkanBlitEncoder>> {
+        let start = crate::gpu::timing::blit_start();
         crate::gpu::icb::encoder_made();
         predication::boundary(&self.predication, "blitCommandEncoder");
         let raw = encoding("blitCommandEncoder", Policy::Dies, || {
             self.raw.blit_command_encoder()
         })?;
+        crate::gpu::timing::blit("blitCommandEncoder", start, start, start);
         Ok(Some(Obj::new(EncoderObject::new(raw, self))))
     }
 

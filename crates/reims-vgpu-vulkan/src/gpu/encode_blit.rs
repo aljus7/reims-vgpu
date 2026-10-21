@@ -664,11 +664,13 @@ impl BlitEncoder<VulkanPlatform> for VulkanBlitEncoder {
     /// ([`FirstUse::TilerBlit`]).
     fn encode(&self, _on: OnFault, cmd: BlitCmd<'_, VulkanPlatform>) -> RaiseResult<()> {
         let sel = cmd.selector();
+        let start = crate::gpu::timing::blit_start();
         for (buffer, bytes) in named_buffers(&cmd) {
             if let Some(buffer) = buffer {
                 buffer.used(sel, bytes);
             }
         }
+        let used = crate::gpu::timing::blit_mark(start);
         let written = written_memory(&cmd);
         if let Some(options) = self.aborts {
             metal_aborts(
@@ -705,7 +707,8 @@ impl BlitEncoder<VulkanPlatform> for VulkanBlitEncoder {
         ) -> Result<(), rt::Error>| {
             send_describing(sel, Policy::Dies, shape, || self.with(sel, |e| call(e)))
         };
-        match cmd {
+        let checked = crate::gpu::timing::blit_mark(start);
+        let encoded = match cmd {
             BlitCmd::CopyBufferToTexture {
                 source_buffer,
                 source_offset,
@@ -1130,7 +1133,9 @@ impl BlitEncoder<VulkanPlatform> for VulkanBlitEncoder {
             } => caught(&mut |e| e.synchronize_texture(texture.kept(sel), slice, level)),
             BlitCmd::UpdateFence { fence } => caught(&mut |e| e.update_fence(fence)),
             BlitCmd::WaitForFence { fence } => caught(&mut |e| e.wait_for_fence(fence)),
-        }
+        };
+        crate::gpu::timing::blit(sel, start, used, checked);
+        encoded
     }
 }
 

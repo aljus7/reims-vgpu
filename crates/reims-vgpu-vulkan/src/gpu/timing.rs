@@ -203,6 +203,45 @@ fn leak_line(span: &ImportSpan, elapsed: Duration) -> String {
     )
 }
 
+/// A blit command, or a blit encoder's creation, that takes this long or longer is written
+/// ([`blit`]).
+pub const SLOW_BLIT: Duration = Duration::from_millis(20);
+
+/// Where a blit command starts: now, where info lines are on; with them off no clock is read.
+pub fn blit_start() -> Option<MonoTime> {
+    imports_on().then(now)
+}
+
+/// Now, where `start` ([`blit_start`]) is some: a leg's end.
+pub fn blit_mark(start: Option<MonoTime>) -> Option<MonoTime> {
+    start.map(|_| now())
+}
+
+/// Writes the blit command `sel` begun at `start` ([`blit_start`]) where it took [`SLOW_BLIT`]
+/// or more, in its legs: the uses of its buffers checked (to `used`), its writes checked (to
+/// `checked`), then the runtime's call; with the imports live, so a log tells whether the call
+/// slows down as they pile up.
+pub fn blit(sel: &str, start: Option<MonoTime>, used: Option<MonoTime>, checked: Option<MonoTime>) {
+    let (Some(start), Some(used), Some(checked)) = (start, used, checked) else {
+        return;
+    };
+    let end = now();
+    let took = end.saturating_duration_since(start);
+    if took < SLOW_BLIT {
+        return;
+    }
+    let (live, bytes) = crate::remap::live_imports();
+    log::info!(
+        "reims-vgpu timing: blit {sel} took {:.1} ms: uses {:.1} ms, writes {:.1} ms, runtime \
+         {:.1} ms; {live} imports live, {} MiB",
+        ms(took),
+        ms(used.saturating_duration_since(start)),
+        ms(checked.saturating_duration_since(used)),
+        ms(end.saturating_duration_since(checked)),
+        bytes >> 20
+    );
+}
+
 /// `d` in milliseconds.
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
