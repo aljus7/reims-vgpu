@@ -6,12 +6,37 @@ use std::sync::Arc;
 
 use crate::guest::records::APV_PAGE_SIZE;
 use crate::host::{HostPtr, PhysRange};
+use crate::memory::DeathKind;
 use crate::memory::descriptor::MemoryMapDescriptor;
 use crate::memory::mapping::{Mapping, Teardown};
-use crate::memory::DeathKind;
 use crate::num::{ToU64, ToUsize};
+use crate::platform::device::GpuDevice;
 use crate::platform::os::vm::VmProt;
-use crate::platform::Platform;
+use crate::platform::{Handle, HostRange, Platform};
+use crate::raise::{OnFault, RaiseResult};
+use crate::sync::Mutex;
+
+/// The bytes of guest RAM one gather buffer covers ([`MemoryMap::guest_chunk`]), clipped to its
+/// range of the map.
+pub const GUEST_CHUNK: u64 = 32 << 20;
+
+/// One run of guest pages a paging copy reaches through a gather buffer: `length` bytes at
+/// `offset` in `buffer`, a no-copy buffer over a chunk of guest RAM, which are the bytes at `at`
+/// of the paged resource.
+pub struct GuestRun<P: Platform> {
+    /// The chunk's buffer, retained.
+    pub buffer: P::Buffer,
+    /// The run's first byte in the chunk.
+    pub offset: u64,
+    /// The run's first byte in the resource's pages.
+    pub at: u64,
+    /// The run's bytes.
+    pub length: u64,
+}
+
+/// The chunks' buffers by their first guest physical address: `None` for a chunk the device
+/// made no buffer over, which is not asked again.
+type Chunks<P> = std::collections::BTreeMap<u64, Option<<P as Platform>::Buffer>>;
 
 /// One range of the map: `{start, start + length, length, host pointer}`. The field names are
 /// ours.
@@ -33,6 +58,9 @@ pub struct MemoryMapRange {
 pub struct MemoryMap<P: Platform> {
     platform: Arc<P>,
     ranges: Vec<MemoryMapRange>,
+    /// The gather buffers over the ranges' host memory, made at their first use and kept for the
+    /// map's life; a copy shares them, as it shares the memory.
+    chunks: Arc<Mutex<Chunks<P>>>,
 }
 
 impl<P: Platform> std::fmt::Debug for MemoryMap<P> {
@@ -143,7 +171,11 @@ impl<P: Platform> MemoryMap<P> {
             return None;
         }
 
-        Some(Arc::new(MemoryMap { platform, ranges }))
+        Some(Arc::new(MemoryMap {
+            platform,
+            ranges,
+            chunks: Arc::new(Mutex::new(Chunks::<P>::new())),
+        }))
     }
 
     /// A plain init (no validation): the same ranges.
@@ -151,7 +183,77 @@ impl<P: Platform> MemoryMap<P> {
         Arc::new(MemoryMap {
             platform: self.platform.clone(),
             ranges: self.ranges.clone(),
+            chunks: Arc::clone(&self.chunks),
         })
+    }
+
+    /// The host address of the `length` bytes from guest physical `physical` where one range
+    /// holds them all; `None`, with no log, otherwise or for physical 0.
+    pub fn host_address_within_range(&self, physical: u64, length: u64) -> Option<HostPtr> {
+        let end = physical.checked_add(length)?;
+        if physical == 0 || length == 0 {
+            return None;
+        }
+        let range = self
+            .ranges
+            .iter()
+            .find(|r| physical >= r.physical_address && physical < r.physical_end)?;
+        (end <= range.physical_end).then(|| {
+            ptr_u64(
+                physical
+                    .wrapping_sub(range.physical_address)
+                    .wrapping_add(addr_u64(range.virtual_address)),
+            )
+        })
+    }
+
+    /// The gather buffer over the chunk of guest RAM holding guest physical `physical`
+    /// ([`GUEST_CHUNK`] aligned, clipped to its range), with `physical`'s offset in it and the
+    /// chunk's bytes from there. The buffer is made over the range's host memory at the chunk's
+    /// first use and kept for the map's life. `None` where no range holds `physical` or the
+    /// device made no buffer.
+    pub fn guest_chunk(
+        &self,
+        device: &P::Device,
+        physical: u64,
+    ) -> RaiseResult<Option<(P::Buffer, u64, u64)>> {
+        let Some(range) = self
+            .ranges
+            .iter()
+            .find(|r| physical >= r.physical_address && physical < r.physical_end)
+        else {
+            return Ok(None);
+        };
+        let aligned = physical & !GUEST_CHUNK.wrapping_sub(1);
+        let start = aligned.max(range.physical_address);
+        let end = aligned.saturating_add(GUEST_CHUNK).min(range.physical_end);
+        let mut chunks = self.chunks.lock();
+        let buffer = match chunks.get(&start) {
+            Some(made) => made.as_ref().map(Handle::clone_ref),
+            None => {
+                let host = ptr_u64(
+                    start
+                        .wrapping_sub(range.physical_address)
+                        .wrapping_add(addr_u64(range.virtual_address)),
+                );
+                #[allow(unsafe_code)] // architecture 17.3: the no-copy buffer over guest RAM
+                // SAFETY: `host..host + (end - start)` lies in one range of the map, the host's
+                // guest RAM, which stays mapped for the device's life; the buffer is kept in the
+                // map, which the device holds.
+                let bytes = unsafe { HostRange::new(host, end.wrapping_sub(start)) };
+                let made = device.new_buffer_over_host_memory(OnFault::Return, bytes, 0, None)?;
+                let kept = made.as_ref().map(Handle::clone_ref);
+                if made.is_none() {
+                    log::warn!(
+                        "no gather buffer over guest RAM at {start:#x} ({:#x} bytes)",
+                        end.wrapping_sub(start)
+                    );
+                }
+                chunks.insert(start, made);
+                kept
+            }
+        };
+        Ok(buffer.map(|b| (b, physical.wrapping_sub(start), end.wrapping_sub(physical))))
     }
 
     /// The ranges, in stored (sorted) order.
@@ -1098,9 +1200,10 @@ mod tests {
         fn a_remainder_with_no_next_range_is_refused_after_the_first_piece() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x4000), (0xc000, 0x4000)]);
-            assert!(m
-                .new_range_mapping(&[pr(0x4000, 0x8000)], 0x8000, 0)
-                .is_none());
+            assert!(
+                m.new_range_mapping(&[pr(0x4000, 0x8000)], 0x8000, 0)
+                    .is_none()
+            );
             assert_eq!(
                 sels(&p),
                 vec!["mach_vm_allocate", "mach_vm_remap", "mach_vm_deallocate"]
@@ -1134,9 +1237,10 @@ mod tests {
         fn more_than_the_total_is_refused_before_mapping() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x8000)]);
-            assert!(m
-                .new_range_mapping(&[pr(0x4000, PAGE), pr(0x8000, PAGE)], PAGE, 0)
-                .is_none());
+            assert!(
+                m.new_range_mapping(&[pr(0x4000, PAGE), pr(0x8000, PAGE)], PAGE, 0)
+                    .is_none()
+            );
             assert_eq!(
                 sels(&p),
                 vec!["mach_vm_allocate", "mach_vm_remap", "mach_vm_deallocate"]
@@ -1147,9 +1251,10 @@ mod tests {
         fn less_than_the_total_is_refused_after_mapping() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x8000)]);
-            assert!(m
-                .new_range_mapping(&[pr(0x4000, PAGE)], 2 * PAGE, 0)
-                .is_none());
+            assert!(
+                m.new_range_mapping(&[pr(0x4000, PAGE)], 2 * PAGE, 0)
+                    .is_none()
+            );
             assert_eq!(
                 sels(&p),
                 vec!["mach_vm_allocate", "mach_vm_remap", "mach_vm_deallocate"]
@@ -1161,9 +1266,10 @@ mod tests {
         fn an_end_overflow_is_refused() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x8000)]);
-            assert!(m
-                .new_range_mapping(&[pr(u64::MAX - 0xfff, PAGE)], PAGE, 0)
-                .is_none());
+            assert!(
+                m.new_range_mapping(&[pr(u64::MAX - 0xfff, PAGE)], PAGE, 0)
+                    .is_none()
+            );
             assert_eq!(sels(&p), vec!["mach_vm_allocate", "mach_vm_deallocate"]);
         }
 
@@ -1171,9 +1277,10 @@ mod tests {
         fn outside_every_range_is_refused() {
             let p = plat();
             let (_ram, m) = ram_map(&p, &[(0x4000, 0x8000)]);
-            assert!(m
-                .new_range_mapping(&[pr(0x10_0000, PAGE)], PAGE, 0)
-                .is_none());
+            assert!(
+                m.new_range_mapping(&[pr(0x10_0000, PAGE)], PAGE, 0)
+                    .is_none()
+            );
             assert_eq!(sels(&p), vec!["mach_vm_allocate", "mach_vm_deallocate"]);
         }
 

@@ -533,6 +533,19 @@ impl<P: Platform> LocalTask<P> {
                 deserializer.decode_segments(hold, &mut cursors, command_buffer.as_ref())?;
             let decoded = now();
             let (pipelines, pipeline_time) = timing::take_pipelines();
+            if timed {
+                timing::add_exec_phase(
+                    timing::ExecPhase::Prepare,
+                    prepared.saturating_duration_since(started),
+                );
+                timing::add_exec_phase(
+                    timing::ExecPhase::Decode,
+                    decoded.saturating_duration_since(prepared),
+                );
+                if command_buffer.is_some() {
+                    timing::count_exec_task(self.task_id, started);
+                }
+            }
             if let Some(buffer) = &command_buffer {
                 let exec_buffer = buffer.clone_ref();
                 let handler = Arc::clone(&done);
@@ -543,10 +556,11 @@ impl<P: Platform> LocalTask<P> {
                     OnFault::Return,
                     Box::new(move |info: CompletedInfo| {
                         if timed {
-                            let gpu = platform
-                                .clock()
-                                .now_mono()
-                                .saturating_duration_since(decoded);
+                            let done_at = platform.clock().now_mono();
+                            let gpu = done_at.saturating_duration_since(decoded);
+                            timing::add_exec_phase(timing::ExecPhase::Gpu, gpu);
+                            timing::exec_task_done(task_id, done_at, gpu);
+                            timing::report_execs(done_at);
                             if gpu >= timing::SLOW_EXEC {
                                 log::info!(
                                     "reims-vgpu timing: task {task_id}: an exec's GPU work \

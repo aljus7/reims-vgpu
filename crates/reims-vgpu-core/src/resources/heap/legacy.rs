@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use crate::guest::GuestPtr;
+use crate::memory::map::GuestRun;
 use crate::platform::blit::{BlitCmd, BlitEncoder};
 use crate::platform::device::GpuDevice;
 use crate::platform::resource::Heap;
@@ -20,6 +21,7 @@ use crate::resources::resource::{
     ResourceClass, ResourceKind, STORAGE_MODE_PRIVATE, TaskRef, features_of, platform_for,
     read_descriptor,
 };
+use crate::resources::texture::blit::gather_runs;
 use crate::resources::{RaiseKind, raise};
 use crate::rt::Hold;
 use crate::sync::Mutex;
@@ -30,6 +32,9 @@ pub struct LegacyHeapResource<P: Platform> {
     heap: Option<P::Heap>,
     /// The guest's pages, bound at the first prepare.
     transfer_buffer: Mutex<Option<P::Buffer>>,
+    /// The guest's pages as runs over guest RAM, used instead of a transfer buffer where the task
+    /// gives them; bound and dropped like it.
+    gathered: Mutex<Option<Arc<[GuestRun<P>]>>>,
     /// A private buffer over the whole heap.
     transfer_heap_buffer: Option<P::Buffer>,
     length: u64,
@@ -110,6 +115,7 @@ impl<P: Platform> LegacyHeapResource<P> {
                 task,
                 heap: Some(heap),
                 transfer_buffer: Mutex::new(None),
+                gathered: Mutex::new(None),
                 transfer_heap_buffer,
                 length: d.length(),
                 page: d.page(),
@@ -142,13 +148,17 @@ impl<P: Platform> LegacyHeapResource<P> {
     /// Binds the guest pages unless bound; a torn-down task gives none, which raises.
     fn ensure_physical(&self, hold: Hold<'_>) -> RaiseResult<()> {
         // Kept until a discard.
-        if self.transfer_buffer.lock().is_some() {
+        if self.transfer_buffer.lock().is_some() || self.gathered.lock().is_some() {
             return Ok(());
         }
-        let tb = match self.task.upgrade() {
-            Some(t) => Some(t.new_buffer_for_virtual_page(hold, self.page, self.length)?),
-            None => None,
+        let Some(task) = self.task.upgrade() else {
+            return raise(RaiseKind::NoTransferBuffer);
         };
+        if let Some(runs) = task.guest_runs_for_virtual_page(hold, self.page, self.length)? {
+            *self.gathered.lock() = Some(runs);
+            return Ok(());
+        }
+        let tb = Some(task.new_buffer_for_virtual_page(hold, self.page, self.length)?);
         let Some(tb) = tb else {
             return raise(RaiseKind::NoTransferBuffer);
         };
@@ -159,6 +169,13 @@ impl<P: Platform> LegacyHeapResource<P> {
     /// Encodes one copy between the transfer buffer and the heap's buffer (skipped with no
     /// encoder).
     fn copy(&self, encoder: Option<&P::BlitEncoder>, upload: bool) -> RaiseResult<()> {
+        let gathered = self.gathered.lock().clone();
+        if let Some(runs) = gathered {
+            return match (encoder, self.transfer_heap_buffer.as_ref()) {
+                (Some(_), Some(buffer)) => gather_runs::<P>(encoder, &runs, buffer, !upload),
+                _ => Ok(()),
+            };
+        }
         let tb = self.transfer_buffer.lock();
         let (src, dst) = if upload {
             (tb.as_ref(), self.transfer_heap_buffer.as_ref())
@@ -232,6 +249,8 @@ impl<P: Platform> ResourceClass<P> for LegacyHeapResource<P> {
     fn discard(&self, this: &Resource<P>) -> RaiseResult<()> {
         let old = self.transfer_buffer.lock().take();
         drop(old);
+        let old_runs = self.gathered.lock().take();
+        drop(old_runs);
         // Metal first, then the flag (the private buffer's order is the opposite).
         self.heap
             .as_ref()
@@ -255,6 +274,7 @@ impl<P: Platform> Drop for LegacyHeapResource<P> {
         // The heap, the transfer buffer, the heap's buffer.
         drop(self.heap.take());
         drop(self.transfer_buffer.get_mut().take());
+        drop(self.gathered.get_mut().take());
         drop(self.transfer_heap_buffer.take());
     }
 }
@@ -449,6 +469,7 @@ mod tests {
                 task: gone_task(),
                 heap: None,
                 transfer_buffer: Mutex::new(None),
+                gathered: Mutex::new(None),
                 transfer_heap_buffer: None,
                 length: 0x8000,
                 page: 0,

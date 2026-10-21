@@ -737,6 +737,15 @@ impl<P: Platform> ResourceHost<P> for LocalTask<P> {
         self.on_platform(|| self.buffer_for_page(hold, page, length))
     }
 
+    fn guest_runs_for_virtual_page(
+        &self,
+        hold: Hold<'_>,
+        page: u32,
+        length: u64,
+    ) -> RaiseResult<Option<Arc<[crate::memory::map::GuestRun<P>]>>> {
+        self.on_platform(|| self.guest_runs(hold, page, length))
+    }
+
     fn prepare_backing(
         &self,
         hold: Hold<'_>,

@@ -73,6 +73,20 @@ pub trait ResourceHost<P: Platform>: Send + Sync {
         length: u64,
     ) -> RaiseResult<P::Buffer>;
 
+    /// The guest's pages from `page`, `length` bytes, as runs in gather buffers over guest RAM
+    /// ([`crate::memory::map::GuestRun`]), which paging copies through a buffer of its own
+    /// instead of a buffer over a mapping of the pages. `None` where the task makes none: the
+    /// caller makes a buffer over the pages ([`Self::new_buffer_for_virtual_page`]).
+    fn guest_runs_for_virtual_page(
+        &self,
+        hold: Hold<'_>,
+        page: u32,
+        length: u64,
+    ) -> RaiseResult<Option<Arc<[crate::memory::map::GuestRun<P>]>>> {
+        let _ = (hold, page, length);
+        Ok(None)
+    }
+
     /// Prepares an IOSurface backing. `encoder` is `None` when Metal gave no encoder, which
     /// nothing checks: the backing's validity writes still happen.
     fn prepare_backing(

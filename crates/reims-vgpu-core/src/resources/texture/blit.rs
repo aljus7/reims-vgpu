@@ -4,10 +4,12 @@
 
 use std::sync::Arc;
 
+use crate::memory::map::GuestRun;
 use crate::nil_send;
 use crate::num::{self, Truncate};
 use crate::platform::Platform;
 use crate::platform::blit::{BlitCmd, BlitEncoder};
+use crate::platform::device::GpuDevice;
 use crate::platform::resource::Texture;
 use crate::platform::types::{MtlOrigin, MtlSize};
 use crate::raise::{Kept, keep_forever};
@@ -57,7 +59,91 @@ pub(crate) fn page<P: Platform>(
     is_download: bool,
     planes: &[(&TextureDimensionRecord, u64)],
 ) -> RaiseResult<()> {
-    let transfer = paged.transfer_buffer.lock();
+    let gathered = paged.gathered.lock().clone();
+    let held;
+    let staging;
+    let transfer: Option<&P::Buffer> = match &gathered {
+        Some(runs) => {
+            staging = match encoder {
+                Some(_) => staging_buffer(paged)?,
+                None => None,
+            };
+            if encoder.is_some() && staging.is_none() {
+                log::warn!(
+                    "no staging buffer of {:#x} bytes to page a texture: not paged",
+                    paged.length
+                );
+                return Ok(());
+            }
+            if let Some(staging) = staging.as_ref() {
+                // A download writes back whole runs: the bytes no copy writes are the guest's own.
+                gather_runs::<P>(encoder, runs, staging, false)?;
+            }
+            staging.as_ref()
+        }
+        None => {
+            held = paged.transfer_buffer.lock();
+            held.as_ref()
+        }
+    };
+    copy_planes(paged, encoder, is_download, planes, transfer)?;
+    if is_download && let (Some(runs), Some(staging)) = (&gathered, transfer) {
+        gather_runs::<P>(encoder, runs, staging, true)?;
+    }
+    Ok(())
+}
+
+/// A private buffer of the texture's page length for one paging's gathered bytes, which the
+/// command buffer holds while it runs. `None` with no task, no device, or no buffer.
+fn staging_buffer<P: Platform>(paged: &PagedTexture<P>) -> RaiseResult<Option<P::Buffer>> {
+    let Some(device) = paged.task.upgrade().and_then(|task| task.mtl_device()) else {
+        return Ok(None);
+    };
+    device.new_buffer_of_length(OnFault::Return, paged.length, STORAGE_MODE_PRIVATE)
+}
+
+/// `MTLResourceStorageModePrivate`: the staging buffer's options.
+const STORAGE_MODE_PRIVATE: u64 = 0x20;
+
+/// One copy per run between the guest's RAM and `staging`: into the guest with `scatter`, out of
+/// it otherwise.
+pub(crate) fn gather_runs<P: Platform>(
+    encoder: Option<&P::BlitEncoder>,
+    runs: &[GuestRun<P>],
+    staging: &P::Buffer,
+    scatter: bool,
+) -> RaiseResult<()> {
+    for run in runs {
+        let (source_buffer, source_offset, destination_buffer, destination_offset) = if scatter {
+            (staging, run.at, &run.buffer, run.offset)
+        } else {
+            (&run.buffer, run.offset, staging, run.at)
+        };
+        nil_send!(
+            encoder,
+            encode(
+                OnFault::Return,
+                BlitCmd::CopyBufferToBuffer {
+                    source_buffer: Some(source_buffer),
+                    source_offset,
+                    destination_buffer: Some(destination_buffer),
+                    destination_offset,
+                    size: run.length
+                }
+            )
+        )?;
+    }
+    Ok(())
+}
+
+/// [`page`]'s texture copies, through `transfer`.
+fn copy_planes<P: Platform>(
+    paged: &PagedTexture<P>,
+    encoder: Option<&P::BlitEncoder>,
+    is_download: bool,
+    planes: &[(&TextureDimensionRecord, u64)],
+    transfer: Option<&P::Buffer>,
+) -> RaiseResult<()> {
     let Some(&(first, _)) = planes.first() else {
         return Ok(());
     };
@@ -106,7 +192,7 @@ pub(crate) fn page<P: Platform>(
                                     source_level: level,
                                     source_origin: MtlOrigin::new(0, 0, 0),
                                     source_size: size,
-                                    destination_buffer: transfer.as_ref(),
+                                    destination_buffer: transfer,
                                     destination_offset: offset,
                                     destination_bytes_per_row: bytes_per_row,
                                     destination_bytes_per_image: bytes_per_image,
@@ -125,7 +211,7 @@ pub(crate) fn page<P: Platform>(
                             encode(
                                 OnFault::Return,
                                 BlitCmd::CopyBufferToTextureOptions {
-                                    source_buffer: transfer.as_ref(),
+                                    source_buffer: transfer,
                                     source_offset: offset,
                                     source_bytes_per_row: bytes_per_row,
                                     source_bytes_per_image: bytes_per_image,

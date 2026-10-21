@@ -10,17 +10,65 @@ use super::{
 use crate::device::tasks::MAX_LOCAL_TASK_LENGTH;
 use crate::host::{HostPtr, PhysRange};
 use crate::memory::cursor::Cursor;
-use crate::memory::mapping::Mapping;
+use crate::memory::map::GuestRun;
+use crate::memory::mapping::{Mapping, Teardown};
 use crate::memory::tracker::RangeTracker;
 use crate::num::{ToU64, ToUsize};
 use crate::platform::Platform;
-use crate::platform::os::clock::Clock;
 use crate::platform::device::GpuDevice;
+use crate::platform::os::clock::Clock;
 use crate::raise::{Kept, keep_forever};
 use crate::raise::{OnFault, RaiseResult};
 use crate::resources::host::MappedAddress;
 use crate::rt::Hold;
 use crate::tasks::{Completion, ExecStatus};
+
+/// Whether paging gathers guest pages through the memory map's buffers over guest RAM: on unless
+/// `REIMS_VGPU_GATHER` is `0`, read once.
+fn gathers_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("REIMS_VGPU_GATHER").is_none_or(|v| v != "0"))
+}
+
+/// Whether physically contiguous task pages are mapped straight over guest RAM: on unless
+/// `REIMS_VGPU_DIRECT` is `0`, read once.
+fn direct_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("REIMS_VGPU_DIRECT").is_none_or(|v| v != "0"))
+}
+
+/// The first guest physical address of `ranges` where they are one contiguous run of `length`
+/// bytes in all.
+fn contiguous(ranges: &[PhysRange], length: u64) -> Option<u64> {
+    let start = ranges.first()?.physical_address;
+    let mut end = start;
+    for range in ranges {
+        if range.physical_address != end {
+            return None;
+        }
+        end = end.checked_add(range.physical_length)?;
+    }
+    (end.wrapping_sub(start) == length).then_some(start)
+}
+
+/// Counts mappings of task pages taken straight from guest RAM against those remapped, and
+/// logs the totals every 4096 with timing on.
+fn count_direct(direct: bool) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static DIRECT: AtomicU64 = AtomicU64::new(0);
+    static MAPPED: AtomicU64 = AtomicU64::new(0);
+    let counter = if direct { &DIRECT } else { &MAPPED };
+    counter.fetch_add(1, Ordering::Relaxed);
+    let (d, m) = (
+        DIRECT.load(Ordering::Relaxed),
+        MAPPED.load(Ordering::Relaxed),
+    );
+    if crate::timing::enabled() && d.wrapping_add(m) & 4095 == 0 {
+        log::info!(
+            "reims-vgpu timing: task page mappings: {d} straight over guest RAM, {m} remapped"
+        );
+    }
+}
 
 /// The bounds check every task accessor opens with. A range ending exactly at the task's end is
 /// accepted (a copy's is not: [`LocalTask::copy_range`]).
@@ -201,6 +249,36 @@ impl<P: Platform> LocalTask<P> {
         length: u64,
         need_writable: bool,
     ) -> RaiseResult<Option<Arc<Mapping<P>>>> {
+        let (ranges, writable) = self.physical_runs(hold, offset, length)?;
+        if need_writable && !writable {
+            return Ok(None);
+        }
+        let memory_map = self.device.upgrade().and_then(|d| d.memory_map());
+        if let Some(m) = &memory_map
+            && gathers_enabled()
+            && direct_enabled()
+        {
+            let straight = writable
+                .then(|| contiguous(&ranges, length))
+                .flatten()
+                .and_then(|start| m.host_address_within_range(start, length));
+            count_direct(straight.is_some());
+            if let Some(host) = straight {
+                // Guest RAM stays mapped for the device's life: nothing to tear down.
+                return Ok(Some(Mapping::new(host, length, true, Teardown::None)));
+            }
+        }
+        Ok(memory_map.and_then(|m| m.new_range_mapping(&ranges, length, u32::from(!writable))))
+    }
+
+    /// The guest physical runs of the task's pages `offset..offset + length`, in order, and
+    /// whether every page is writable, after the mapping checks.
+    fn physical_runs(
+        &self,
+        hold: Hold<'_>,
+        offset: u64,
+        length: u64,
+    ) -> RaiseResult<(Vec<PhysRange>, bool)> {
         check_mappable(offset, length, self.length, !self.task_root.is_null())?;
         let mut ranges: Vec<PhysRange> = Vec::new();
         let mut writable = true;
@@ -237,11 +315,70 @@ impl<P: Platform> LocalTask<P> {
         if range.physical_length != 0 {
             ranges.push(range);
         }
-        if need_writable && !writable {
+        Ok((ranges, writable))
+    }
+
+    /// The task's pages from `page`, `length` bytes, as runs in the memory map's gather buffers
+    /// ([`crate::memory::map::MemoryMap::guest_chunk`]), cut where a run leaves a chunk. `None`
+    /// in the blocks setup, with gathers turned off (`REIMS_VGPU_GATHER=0`), with no device or
+    /// memory map, for a read-only page (a download would write it), or where a chunk has no
+    /// buffer: the caller maps the pages instead.
+    pub(super) fn guest_runs(
+        &self,
+        hold: Hold<'_>,
+        page: u32,
+        length: u64,
+    ) -> RaiseResult<Option<Arc<[GuestRun<P>]>>> {
+        if !gathers_enabled() || matches!(self.backend, Backend::Blocks { .. }) {
             return Ok(None);
         }
-        let memory_map = self.device.upgrade().and_then(|d| d.memory_map());
-        Ok(memory_map.and_then(|m| m.new_range_mapping(&ranges, length, u32::from(!writable))))
+        let Some(device) = self.base.mtl_device.as_deref() else {
+            return Ok(None);
+        };
+        let Some(memory_map) = self.device.upgrade().and_then(|d| d.memory_map()) else {
+            return Ok(None);
+        };
+        let timed = crate::timing::enabled();
+        let clock = self.platform.clock();
+        let now = || timed.then(|| clock.now_mono());
+        let started = now();
+        let (ranges, writable) = self.physical_runs(hold, page_address(page), length)?;
+        let walked = now();
+        if !writable {
+            return Ok(None);
+        }
+        let mut runs = Vec::with_capacity(ranges.len());
+        let mut at: u64 = 0;
+        for range in ranges {
+            let mut physical = range.physical_address;
+            let mut left = range.physical_length;
+            while left != 0 {
+                let Some((buffer, offset, in_chunk)) = memory_map.guest_chunk(device, physical)?
+                else {
+                    return Ok(None);
+                };
+                let piece = left.min(in_chunk);
+                runs.push(GuestRun {
+                    buffer,
+                    offset,
+                    at,
+                    length: piece,
+                });
+                at = at.wrapping_add(piece);
+                physical = physical.wrapping_add(piece);
+                left = left.wrapping_sub(piece);
+            }
+        }
+        if at != length {
+            return Ok(None);
+        }
+        if let (Some(started), Some(walked), Some(made)) = (started, walked, now()) {
+            crate::timing::add_page_buffer(
+                walked.saturating_duration_since(started),
+                made.saturating_duration_since(walked),
+            );
+        }
+        Ok(Some(runs.into()))
     }
 
     /// The host address of task memory at `offset`, mapped for `length` bytes. In the map setup
@@ -510,5 +647,34 @@ impl<P: Platform> LocalTask<P> {
         let pointer = HostPtr::from_ptr(buffer.as_mut_ptr());
         let keep: Arc<dyn std::any::Any + Send + Sync> = Arc::new(buffer);
         Some(Cursor::with_pointer(keep, pointer, length))
+    }
+}
+
+#[cfg(test)]
+mod contiguity_tests {
+    use super::contiguous;
+    use crate::host::PhysRange;
+
+    fn pr(physical_address: u64, physical_length: u64) -> PhysRange {
+        PhysRange {
+            physical_address,
+            physical_length,
+        }
+    }
+
+    #[test]
+    fn adjacent_runs_are_one_run_from_the_first() {
+        let runs = [pr(0x8000, 0x8000), pr(0x10000, 0x8000), pr(0x18000, 0x4000)];
+        assert_eq!(contiguous(&runs, 0x14000), Some(0x8000));
+    }
+
+    #[test]
+    fn a_gap_a_wrong_total_or_no_runs_is_none() {
+        assert_eq!(
+            contiguous(&[pr(0x8000, 0x4000), pr(0x10000, 0x4000)], 0x8000),
+            None
+        );
+        assert_eq!(contiguous(&[pr(0x8000, 0x4000)], 0x8000), None);
+        assert_eq!(contiguous(&[], 0), None);
     }
 }

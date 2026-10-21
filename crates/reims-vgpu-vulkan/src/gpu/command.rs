@@ -1346,7 +1346,9 @@ impl CommandBuffer<VulkanPlatform> for VulkanCommandBuffer {
             });
             self.check_executions(failure.as_ref().map(|f| &f.encoders), progress.as_deref());
             let check = match (&failure, opened) {
-                (None, Some(opened)) => Some(backing::submission_check(opened.commit())),
+                (None, Some(opened)) if backing::checks_enabled() => {
+                    Some(backing::submission_check(opened.commit()))
+                }
                 _ => None,
             };
             if let Some(progress) = &progress {

@@ -752,6 +752,16 @@ fn ids(used: rt::UsedResources) -> Vec<rt::ObjectId> {
         .collect()
 }
 
+/// Whether commits carry [`submission_check`]: on unless `REIMS_VGPU_SUBMISSION_CHECK` is `0`, an
+/// experiment's switch. The runtime holds a checked submission that waits for an event a GPU
+/// signal reaches until that signal landed, where an unchecked one waits on the GPU.
+pub(crate) fn checks_enabled() -> bool {
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("REIMS_VGPU_SUBMISSION_CHECK").map_or(true, |v| v != "0")
+    });
+    *ON
+}
+
 /// The check of each submission of the command buffer committed as `cb`
 /// ([`rt::CommandBuffer::set_submission_check`]), which the runtime runs on its scheduler thread
 /// once the submission's event waits are met, just before it submits it: one that uses a

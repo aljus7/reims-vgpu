@@ -68,6 +68,7 @@ use std::sync::Arc;
 
 use zerocopy::{FromBytes, IntoBytes};
 
+use crate::memory::map::GuestRun;
 use crate::num::ToUsize;
 use crate::platform::resource::{GpuResource, Texture};
 use crate::platform::{Handle, Platform};
@@ -219,6 +220,10 @@ pub struct PagedTexture<P: Platform> {
     pub(crate) texture: P::Texture,
     /// The guest pages, bound at the first paging of a life and dropped by a discard.
     pub(crate) transfer_buffer: Mutex<Option<P::Buffer>>,
+    /// The guest pages as runs in gather buffers over guest RAM, bound instead of
+    /// `transfer_buffer` where the task makes them, and dropped by a discard: the blits page
+    /// through a buffer of their own ([`blit::page`]).
+    pub(crate) gathered: Mutex<Option<Arc<[GuestRun<P>]>>>,
 }
 
 /// The five layouts of a paged texture.
@@ -363,6 +368,7 @@ impl<P: Platform> PagedTexture<P> {
             is_pvrtc: false,
             texture: texture.clone_ref(),
             transfer_buffer: Mutex::new(None),
+            gathered: Mutex::new(None),
         }
     }
 
@@ -383,13 +389,17 @@ impl<P: Platform> PagedTexture<P> {
     /// Binds the guest pages unless bound: nothing walks them again while the transfer buffer is
     /// held. The lock is a leaf; the task is asked outside it.
     pub(crate) fn ensure_physical(&self, hold: Hold<'_>) -> RaiseResult<()> {
-        // A held transfer buffer is never rebound.
-        if self.transfer_buffer.lock().is_some() {
+        // A held transfer buffer or gather is never rebound.
+        if self.transfer_buffer.lock().is_some() || self.gathered.lock().is_some() {
             return Ok(());
         }
         let Some(task) = self.task.upgrade() else {
             crate::fatal!(DeathKind::GoneTaskPages)
         };
+        if let Some(runs) = task.guest_runs_for_virtual_page(hold, self.page, self.length)? {
+            *self.gathered.lock() = Some(runs);
+            return Ok(());
+        }
         // The task raises rather than answer nothing.
         let buffer = task.new_buffer_for_virtual_page(hold, self.page, self.length)?;
         *self.transfer_buffer.lock() = Some(buffer);
@@ -399,6 +409,7 @@ impl<P: Platform> PagedTexture<P> {
     /// Drops the guest pages and makes the texture volatile; host-valid is kept.
     pub(crate) fn discard(&self, state: &ResourceState) -> RaiseResult<()> {
         drop(self.transfer_buffer.lock().take());
+        drop(self.gathered.lock().take());
         self.texture.set_purgeable_state(PURGEABLE_VOLATILE)?;
         state.set_is_volatile(true);
         Ok(())

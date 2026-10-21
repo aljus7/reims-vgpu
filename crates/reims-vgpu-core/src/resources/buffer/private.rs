@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::guest::GuestPtr;
+use crate::memory::map::GuestRun;
 use crate::platform::blit::{BlitCmd, BlitEncoder};
 use crate::platform::device::GpuDevice;
 use crate::platform::resource::GpuResource;
@@ -15,6 +16,7 @@ use crate::resources::resource::{
     PURGEABLE_EMPTY, PURGEABLE_NON_VOLATILE, PURGEABLE_VOLATILE, RESOURCE_STORAGE_MODE_PRIVATE,
     Resource, ResourceClass, ResourceKind, TaskRef, read_descriptor,
 };
+use crate::resources::texture::blit::gather_runs;
 use crate::resources::{RaiseKind, raise};
 use crate::rt::Hold;
 use crate::sync::Mutex;
@@ -26,6 +28,9 @@ pub struct PrivateBufferResource<P: Platform> {
     buffer: Option<P::Buffer>,
     /// The guest's pages, bound at the first prepare and kept until a discard.
     transfer_buffer: Mutex<Option<P::Buffer>>,
+    /// The guest's pages as runs over guest RAM, used instead of a transfer buffer where the task
+    /// gives them; bound and dropped like it.
+    gathered: Mutex<Option<Arc<[GuestRun<P>]>>>,
     length: u64,
     page: u32,
 }
@@ -67,6 +72,7 @@ impl<P: Platform> PrivateBufferResource<P> {
                 task,
                 buffer,
                 transfer_buffer: Mutex::new(None),
+                gathered: Mutex::new(None),
                 length: d.length,
                 page: d.page,
             },
@@ -80,13 +86,17 @@ impl<P: Platform> PrivateBufferResource<P> {
 
     /// Binds the guest pages unless bound; a torn-down task gives none, which raises.
     fn ensure_physical(&self, hold: Hold<'_>) -> RaiseResult<()> {
-        if self.transfer_buffer.lock().is_some() {
+        if self.transfer_buffer.lock().is_some() || self.gathered.lock().is_some() {
             return Ok(());
         }
-        let tb = match self.task.upgrade() {
-            Some(t) => Some(t.new_buffer_for_virtual_page(hold, self.page, self.length)?),
-            None => None,
+        let Some(task) = self.task.upgrade() else {
+            return raise(RaiseKind::NoGuestBuffer);
         };
+        if let Some(runs) = task.guest_runs_for_virtual_page(hold, self.page, self.length)? {
+            *self.gathered.lock() = Some(runs);
+            return Ok(());
+        }
+        let tb = Some(task.new_buffer_for_virtual_page(hold, self.page, self.length)?);
         let Some(tb) = tb else {
             return raise(RaiseKind::NoGuestBuffer);
         };
@@ -121,6 +131,13 @@ impl<P: Platform> PrivateBufferResource<P> {
     /// Encodes one copy between the transfer buffer and the private buffer (skipped with no
     /// encoder).
     fn copy(&self, encoder: Option<&P::BlitEncoder>, upload: bool) -> RaiseResult<()> {
+        let gathered = self.gathered.lock().clone();
+        if let Some(runs) = gathered {
+            return match (encoder, self.buffer.as_ref()) {
+                (Some(_), Some(buffer)) => gather_runs::<P>(encoder, &runs, buffer, !upload),
+                _ => Ok(()),
+            };
+        }
         let tb = self.transfer_buffer.lock();
         let (src, dst) = if upload {
             (tb.as_ref(), self.buffer.as_ref())
@@ -147,6 +164,7 @@ impl<P: Platform> Drop for PrivateBufferResource<P> {
         // The private buffer, then the transfer buffer.
         drop(self.buffer.take());
         drop(self.transfer_buffer.get_mut().take());
+        drop(self.gathered.get_mut().take());
     }
 }
 
@@ -206,6 +224,8 @@ impl<P: Platform> ResourceClass<P> for PrivateBufferResource<P> {
     fn discard(&self, this: &Resource<P>) -> RaiseResult<()> {
         let old = self.transfer_buffer.lock().take();
         drop(old);
+        let old_runs = self.gathered.lock().take();
+        drop(old_runs);
         // The flag first, then Metal (the legacy heap's order is the opposite). The previous
         // state is ignored.
         this.state.set_is_volatile(true);
@@ -395,6 +415,7 @@ mod tests {
                 task: gone_task(),
                 buffer: None,
                 transfer_buffer: Mutex::new(None),
+                gathered: Mutex::new(None),
                 length: 0x40,
                 page: 1,
             };
@@ -514,6 +535,7 @@ mod tests {
                 task: gone_task(),
                 buffer: None,
                 transfer_buffer: Mutex::new(None),
+                gathered: Mutex::new(None),
                 length: 0,
                 page: 0,
             };
