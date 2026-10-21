@@ -297,10 +297,31 @@ fn replace(first: u64, length: u64, new: &[Piece]) -> Result<(), KernReturn> {
     Ok(())
 }
 
+/// `parts` with each piece that continues the one before it (next in the range, the same section
+/// at the next offset, the same protection) joined into it: one view shows the same bytes as the
+/// two. A guest's pages come one or two at a time (core's runs), so this saves a view per piece.
+fn joined(parts: &[Piece]) -> Vec<Piece> {
+    let mut out: Vec<Piece> = Vec::with_capacity(parts.len());
+    for piece in parts {
+        if let Some(last) = out.last_mut()
+            && last.at + last.length == piece.at
+            && last.prot == piece.prot
+            && Arc::ptr_eq(&last.backing.file, &piece.backing.file)
+            && last.backing.offset + last.length == piece.backing.offset
+        {
+            last.length += piece.length;
+            continue;
+        }
+        out.push(piece.clone());
+    }
+    out
+}
+
 /// Maps the retained sections and records their views, including writable import aliases.
 pub(super) fn map_parts(first: u64, length: u64, parts: &[Piece]) -> Result<(), KernReturn> {
-    replace(first, length, parts)?;
-    for piece in parts {
+    let parts = joined(parts);
+    replace(first, length, &parts)?;
+    for piece in &parts {
         files::record(
             first + piece.at,
             piece.length,
@@ -313,10 +334,10 @@ pub(super) fn map_parts(first: u64, length: u64, parts: &[Piece]) -> Result<(), 
 
 fn allocate(length: u64) -> Result<HostAddr, KernReturn> {
     let backing = Backing {
-        file: section(length)?,
+        file: timing::vm_call(timing::VmCall::Section, length, || section(length))?,
         offset: 0,
     };
-    let first = reserve(length)?;
+    let first = timing::vm_call(timing::VmCall::Reserve, length, || reserve(length))?;
     if let Err(kr) = map(first, length, &backing, 3) {
         // SAFETY: the placeholder was never mapped.
         unsafe { VirtualFree(ptr(first), 0, MEM_RELEASE) };
@@ -684,5 +705,44 @@ pub(crate) mod tests {
         }
         assert!(vm.deallocate(target, 4 * PAGE).is_success());
         assert!(vm.deallocate(source, 4 * PAGE).is_success());
+    }
+    #[test]
+    fn contiguous_pieces_of_one_section_are_one_view() {
+        let vm = WindowsVm;
+        let p = PAGE.to_usize();
+        let source = vm.allocate_anywhere(6 * PAGE).unwrap();
+        let target = vm.allocate_anywhere(6 * PAGE).unwrap();
+        for i in 0..6 {
+            // SAFETY: live writable allocation.
+            unsafe { source.as_ptr::<u8>().add(i * p).write(i as u8 + 1) };
+        }
+        let at = |base: HostAddr, page: usize| HostAddr::from_addr(base.addr() + page * p);
+        // Two-page pieces in order, as core's runs come: pages 0-3 join; 5-4 do not.
+        let pieces = [
+            (at(target, 0), at(source, 0), 2 * PAGE),
+            (at(target, 2), at(source, 2), 2 * PAGE),
+            (at(target, 4), at(source, 5), PAGE),
+            (at(target, 5), at(source, 4), PAGE),
+        ];
+        vm.remap_shared_overwrite_many(&pieces).unwrap();
+        let first = target.addr().to_u64();
+        let views: Vec<_> = (VIEWS.lock().range(first..first + 6 * PAGE))
+            .map(|(&base, view)| (base - first, view.length))
+            .collect();
+        assert_eq!(
+            views,
+            vec![(0, 4 * PAGE), (4 * PAGE, PAGE), (5 * PAGE, PAGE)]
+        );
+        for (i, want) in [1u8, 2, 3, 4, 6, 5].into_iter().enumerate() {
+            // SAFETY: each target page aliases a source page.
+            unsafe { assert_eq!(at(target, i).as_ptr::<u8>().read(), want) };
+        }
+        // SAFETY: the joined view shares the source's pages.
+        unsafe {
+            at(target, 3).as_ptr::<u8>().write(9);
+            assert_eq!(at(source, 3).as_ptr::<u8>().read(), 9);
+        }
+        assert!(vm.deallocate(target, 6 * PAGE).is_success());
+        assert!(vm.deallocate(source, 6 * PAGE).is_success());
     }
 }

@@ -38,6 +38,11 @@ use reims_vgpu_core::sync::Mutex;
 
 use crate::os::GuestRamFile;
 
+/// The table's lock, its wait timed in debug runs.
+fn table_lock() -> reims_vgpu_core::sync::MutexGuard<'static, Table> {
+    crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Bookkeeping, 0, || TABLE.lock())
+}
+
 /// The file behind a range: an open descriptor, and the file offset of the range's first byte.
 #[derive(Clone, Debug)]
 pub(crate) struct Backing {
@@ -198,14 +203,14 @@ impl Table {
 /// every range a view can be made of.
 #[cfg(target_os = "linux")]
 pub(crate) fn mappings() -> u64 {
-    TABLE.lock().mappings().to_u64()
+    table_lock().mappings().to_u64()
 }
 
 /// The kernel's mappings the table's runs in `first..end` take, as [`mappings`] counts them
 /// (tests: a range's count to set beside the kernel's).
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn mappings_between(first: u64, end: u64) -> u64 {
-    let table = TABLE.lock();
+    let table = table_lock();
     let mut count = 0u64;
     let mut before: Option<(u64, &Run)> = None;
     for (&at, run) in table.runs.range(first..end) {
@@ -227,14 +232,14 @@ pub(crate) fn record(first: u64, length: u64, backing: Backing, prot: i32) {
 
 /// `length` bytes from `first` show no file from now on.
 pub(crate) fn forget(first: u64, length: u64) {
-    TABLE.lock().forget(first, first.saturating_add(length));
+    table_lock().forget(first, first.saturating_add(length));
 }
 
 /// The pieces of `length` bytes from `first`, each the bytes of one run or registration in
 /// order, those of a run cut where it ends; `None` where a byte has no file behind it.
 pub(crate) fn pieces(first: u64, length: u64) -> Option<Vec<Piece>> {
     let end = first.checked_add(length)?;
-    let table = TABLE.lock();
+    let table = table_lock();
     let mut pieces = Vec::new();
     let mut at = first;
     while at < end {
@@ -285,7 +290,7 @@ pub(crate) fn readable(first: u64, length: u64) -> Option<bool> {
 /// Whether a byte of `length` bytes from `first` lies in a registration.
 pub(crate) fn meets_registration(first: u64, length: u64) -> bool {
     let end = first.saturating_add(length);
-    let table = TABLE.lock();
+    let table = table_lock();
     table
         .registered
         .iter()
@@ -306,7 +311,7 @@ impl Registration {
     /// bytes are registered over the same file and offset.
     pub(crate) fn new(first: u64, length: u64, backing: Backing) -> Registration {
         let end = first.saturating_add(length);
-        let mut table = TABLE.lock();
+        let mut table = table_lock();
         match table
             .registered
             .iter_mut()
@@ -374,7 +379,7 @@ impl Registered {
 impl Drop for Registration {
     /// Counts the registration down, and drops it at the last.
     fn drop(&mut self) {
-        let mut table = TABLE.lock();
+        let mut table = table_lock();
         if let Some(at) =
             (table.registered.iter()).position(|r| r.is(self.first, self.end, &self.backing))
         {

@@ -178,8 +178,26 @@ pub const SLOW_VM_CALL: Duration = Duration::from_millis(20);
 
 /// The host VM calls and views' lock waits since the last leak line: count, total and most of
 /// each, maps, unmaps, placeholder calls and lock waits in that order.
-static VM_CALLS: Mutex<[(u64, Duration, Duration); 4]> =
-    Mutex::new([(0, Duration::ZERO, Duration::ZERO); 4]);
+static VM_CALLS: Mutex<[(u64, Duration, Duration); VM_SLOTS]> =
+    Mutex::new([(0, Duration::ZERO, Duration::ZERO); VM_SLOTS]);
+
+const VM_SLOTS: usize = 12;
+
+/// The leak line's name of each slot of [`VM_CALLS`].
+const VM_NAMES: [&str; VM_SLOTS] = [
+    "maps",
+    "unmaps",
+    "placeholder calls",
+    "lock waits",
+    "sections",
+    "reserves",
+    "runtime reports",
+    "bookkeeping locks",
+    "whole allocates",
+    "whole remaps",
+    "whole protects",
+    "whole deallocates",
+];
 
 /// The kinds [`vm_call`] counts.
 #[derive(Clone, Copy, Debug)]
@@ -190,6 +208,22 @@ pub enum VmCall {
     Unmap,
     /// A placeholder's split, coalesce or release.
     Placeholder,
+    /// A pagefile-backed section's creation.
+    Section,
+    /// A placeholder's reservation.
+    Reserve,
+    /// The report of changed pages to every device's runtime.
+    Report,
+    /// A wait for the remap module's or the backing table's lock.
+    Bookkeeping,
+    /// A whole `HostVm::allocate_anywhere` of the platform's VM.
+    Allocate,
+    /// A whole remap (one or many) of the platform's VM.
+    Remap,
+    /// A whole `HostVm::protect_max` of the platform's VM.
+    Protect,
+    /// A whole `HostVm::deallocate` of the platform's VM.
+    Deallocate,
 }
 
 fn add_vm(slot: usize, took: Duration) {
@@ -220,6 +254,14 @@ pub fn vm_call<T>(kind: VmCall, length: u64, call: impl FnOnce() -> T) -> T {
         VmCall::Map => 0,
         VmCall::Unmap => 1,
         VmCall::Placeholder => 2,
+        VmCall::Section => 4,
+        VmCall::Reserve => 5,
+        VmCall::Report => 6,
+        VmCall::Bookkeeping => 7,
+        VmCall::Allocate => 8,
+        VmCall::Remap => 9,
+        VmCall::Protect => 10,
+        VmCall::Deallocate => 11,
     };
     add_vm(slot, took);
     made
@@ -247,11 +289,7 @@ pub fn vm_lock<T>(lock: impl FnOnce() -> T) -> T {
 fn vm_summary() -> String {
     let calls = std::mem::take(&mut *VM_CALLS.lock());
     let mut out = String::new();
-    for ((count, total, most), name) in
-        calls
-            .iter()
-            .zip(["maps", "unmaps", "placeholder calls", "lock waits"])
-    {
+    for ((count, total, most), name) in calls.iter().zip(VM_NAMES) {
         let n = u32::try_from((*count).max(1)).unwrap_or(u32::MAX);
         out.push_str(&format!(
             "; {count} {name} avg {:.2} ms max {:.1} ms total {:.0} ms",

@@ -354,10 +354,13 @@ impl VulkanVm {
     fn changed(&self, addr: HostAddr, len: u64) -> Range<u64> {
         let (at, length) = pages(addr, len, self.vm.page_size());
         let first = at.addr().to_u64();
-        GUEST_MAPPINGS
-            .lock()
-            .unmapped(first, first.saturating_add(length));
-        (self.report)(at, length);
+        crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Bookkeeping, length, || {
+            GUEST_MAPPINGS.lock()
+        })
+        .unmapped(first, first.saturating_add(length));
+        crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Report, length, || {
+            (self.report)(at, length)
+        });
         first..first.saturating_add(length)
     }
 }
@@ -378,9 +381,11 @@ impl HostVm for VulkanVm {
     }
 
     fn allocate_anywhere(&self, len: u64) -> Result<HostAddr, KernReturn> {
-        let at = self.vm.allocate_anywhere(len)?;
-        self.changed(at, len);
-        Ok(at)
+        crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Allocate, len, || {
+            let at = self.vm.allocate_anywhere(len)?;
+            self.changed(at, len);
+            Ok(at)
+        })
     }
 
     fn allocate_fixed_overwrite(&self, addr: HostAddr, len: u64) -> Result<(), KernReturn> {
@@ -405,29 +410,42 @@ impl HostVm for VulkanVm {
         &self,
         pieces: &[(HostAddr, HostAddr, u64)],
     ) -> Result<(), KernReturn> {
-        let result = self.vm.remap_shared_overwrite_many(pieces);
-        // Every piece before a failure is bookkept like a single remap; a failed batch is
-        // freed whole by the caller.
-        if result.is_ok() {
-            for &(dst, src, len) in pieces {
-                self.remapped(dst, src, len);
+        let total = pieces
+            .iter()
+            .fold(0_u64, |sum, piece| sum.saturating_add(piece.2));
+        crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Remap, total, || {
+            let result = self.vm.remap_shared_overwrite_many(pieces);
+            // Every piece before a failure is bookkept like a single remap; a failed batch is
+            // freed whole by the caller.
+            if result.is_ok() {
+                for &(dst, src, len) in pieces {
+                    self.remapped(dst, src, len);
+                }
             }
-        }
-        result
+            result
+        })
     }
 
     fn protect_max(&self, addr: HostAddr, len: u64, prot: VmProt) -> Result<(), KernReturn> {
-        self.vm.protect_max(addr, len, prot)
+        crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Protect, len, || {
+            self.vm.protect_max(addr, len, prot)
+        })
     }
 
     fn deallocate(&self, addr: HostAddr, len: u64) -> KernReturn {
-        // At the unmap (module docs).
-        let pages = self.changed(addr, len);
-        // Pages a runtime import holds are unmapped once its hold goes (module docs).
-        if HOLDS.lock().unmap(pages) {
-            return KernReturn::SUCCESS;
-        }
-        self.vm.deallocate(addr, len)
+        crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Deallocate, len, || {
+            // At the unmap (module docs).
+            let pages = self.changed(addr, len);
+            // Pages a runtime import holds are unmapped once its hold goes (module docs).
+            if crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Bookkeeping, len, || {
+                HOLDS.lock()
+            })
+            .unmap(pages)
+            {
+                return KernReturn::SUCCESS;
+            }
+            self.vm.deallocate(addr, len)
+        })
     }
 }
 
@@ -438,14 +456,18 @@ impl VulkanVm {
         let mask = self.vm.page_size().wrapping_sub(1);
         let offset = src.addr().to_u64() & mask;
         let replaced = self.changed(dst, len.saturating_add(offset));
-        HOLDS.lock().replaced(&replaced);
+        crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Bookkeeping, len, || {
+            HOLDS.lock()
+        })
+        .replaced(&replaced);
         // Those pages are one of core's mappings of the guest's (module docs).
         let (first, length) = pages(dst, len.saturating_add(offset), self.vm.page_size());
         let first = first.addr().to_u64();
         let source = src.addr().to_u64() & !mask;
-        GUEST_MAPPINGS
-            .lock()
-            .mapped(first, first.saturating_add(length), source);
+        crate::gpu::timing::vm_call(crate::gpu::timing::VmCall::Bookkeeping, length, || {
+            GUEST_MAPPINGS.lock()
+        })
+        .mapped(first, first.saturating_add(length), source);
     }
 }
 

@@ -400,3 +400,19 @@ Finder windows per round, debug build) reproduce the stalls: rounds of about 103
 Open: cut the per-page view churn (keep a paged texture's mapping across prepares, reserve a
 placeholder instead of a throwaway section), and stop holding `VIEWS` across kernel calls. Neither
 is implemented or measured yet.
+
+Soaks 10-11 (same workload) with adjacent pieces of one section joined into one view
+(`vm::joined`) and every remaining step timed (section creation, placeholder reservation,
+runtime reports, the remap and backing tables' locks, and each whole allocate, remap, protect
+and deallocate):
+
+- Soak 10 still stalled 33.9 s; soak 11's rounds were 102-116 s with all 8 apps open every round
+  and the worst stall 7.2 s. One run each, so the join is not shown to help.
+- Section creation, reservation, runtime reports and the bookkeeping locks are negligible
+  (under 0.1 ms each, a few ms per 10 s).
+- The time is the whole remap: one `MapViewOfFile3` per run of guest pages. A 74 MB buffer's
+  remap took 2.6 s, a 256 KiB one 1.8 s; in slow windows 30,000-275,000 maps cost 0.1-0.4 ms
+  each instead of about 2 us.
+
+Fewer views per buffer (reusing a mapping when the same guest pages come back) is the remaining
+lever; it is a design change, not done.
