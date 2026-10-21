@@ -130,6 +130,9 @@ impl<P: Platform> LocalTask<P> {
             }
         }
         let looked_up = now();
+        // Where the paging buffer was made and its waits encoded, and where its blits and
+        // dispatches were encoded: the GPU paging's legs, for the timing line
+        let (mut made, mut encoded) = (looked_up, looked_up);
         if !blit_resources.is_empty() || !compute_resources.is_empty() {
             let command_buffer = match &self.base.paging_queue {
                 Some(queue) => queue.command_buffer(OnFault::Return)?,
@@ -140,6 +143,7 @@ impl<P: Platform> LocalTask<P> {
             {
                 buffer.encode_wait(Some(EventRef::Shared(event)), value)?;
             }
+            made = now();
             sync.needs_sync = true;
             let mut blit_encoder: Option<P::BlitEncoder> = None;
             let mut compute_encoder: Option<P::ComputeEncoder> = None;
@@ -172,6 +176,7 @@ impl<P: Platform> LocalTask<P> {
                 }
                 Ok(())
             })();
+            encoded = now();
             // Whatever the prepares did: an encoder a raise left open is ended, the paging event
             // is signalled at the next counter value, and the buffer is committed; a raise here
             // goes on in place of the prepare's, which ends there
@@ -255,7 +260,8 @@ impl<P: Platform> LocalTask<P> {
                 .map_or("none", |r| r.kind_name());
             log::info!(
                 "reims-vgpu timing: task {}: a prepare took {} ms: lock wait {} ms, lookups {} ms \
-                 (slowest {} ms, resource {}), GPU paging {} ms ({} blit, {} compute), CPU paging \
+                 (slowest {} ms, resource {}), GPU paging {} ms ({} blit, {} compute; make {} ms, \
+                 encode {} ms, commit {} ms), CPU paging \
                  {} ms ({} resources; slowest {} ms, a {}), invalidation {} ms",
                 self.task_id,
                 timing::millis(waiting, finished),
@@ -266,6 +272,9 @@ impl<P: Platform> LocalTask<P> {
                 timing::millis(looked_up, gpu_paged),
                 blit_resources.len(),
                 compute_resources.len(),
+                timing::millis(looked_up, made),
+                timing::millis(made, encoded),
+                timing::millis(encoded, gpu_paged),
                 timing::millis(gpu_paged, cpu_paged),
                 cpu_resources.len(),
                 slowest_cpu.0.as_millis(),
