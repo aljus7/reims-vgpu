@@ -16,6 +16,15 @@ static TWINS: Mutex<BTreeMap<u64, (u64, u64)>> = Mutex::new(BTreeMap::new());
 
 pub(crate) const TWINS_READ_ONLY: bool = true;
 
+/// The writable twins live and their bytes, for the leak lines.
+pub(crate) fn twins() -> (u64, u64) {
+    let twins = TWINS.lock();
+    let bytes = (twins.values())
+        .map(|&(length, _)| length)
+        .fold(0u64, u64::saturating_add);
+    (twins.len().to_u64(), bytes)
+}
+
 pub(crate) fn allocate_zeros(length: u64) -> Result<HostAddr, KernReturn> {
     let at = WindowsVm.allocate_anywhere(length)?;
     if let Some(piece) = files::pieces(at.addr().to_u64(), 1).and_then(|p| p.into_iter().next()) {

@@ -8,6 +8,8 @@
 //!
 //! Each call has a doc comment and a test.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// What the host or guest observes because a kept value is never released.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kept {
@@ -30,9 +32,46 @@ pub enum Kept {
     StaleReader,
 }
 
+impl Kept {
+    /// Every rule, in [`kept_counts`]'s order.
+    pub const ALL: [Kept; 7] = [
+        Kept::UnmapNeverComes,
+        Kept::SurfaceUseCount,
+        Kept::MetalNumbering,
+        Kept::HostReleasesNeverCome,
+        Kept::TimerKeepsFiring,
+        Kept::AddressSpace,
+        Kept::StaleReader,
+    ];
+
+    /// The rule's place in [`Kept::ALL`].
+    const fn index(self) -> usize {
+        match self {
+            Kept::UnmapNeverComes => 0,
+            Kept::SurfaceUseCount => 1,
+            Kept::MetalNumbering => 2,
+            Kept::HostReleasesNeverCome => 3,
+            Kept::TimerKeepsFiring => 4,
+            Kept::AddressSpace => 5,
+            Kept::StaleReader => 6,
+        }
+    }
+}
+
+/// The values kept so far under each rule, in [`Kept::ALL`]'s order: diagnostics only.
+static KEPT: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+/// How many values were kept so far under each rule of [`Kept::ALL`], so a debug log can tell
+/// whether kept values pile up over a session.
+pub fn kept_counts() -> [u64; 7] {
+    KEPT.each_ref().map(|n| n.load(Ordering::Relaxed))
+}
+
 /// Keeps `v` for good under `rule`: its drop never runs.
 pub fn keep_forever<T>(v: T, rule: Kept) {
-    let _ = rule;
+    if let Some(n) = KEPT.get(rule.index()) {
+        n.fetch_add(1, Ordering::Relaxed);
+    }
     std::mem::forget(v);
 }
 
@@ -47,5 +86,16 @@ mod tests {
         let a = Arc::new(());
         keep_forever(Arc::clone(&a), Kept::MetalNumbering);
         assert_eq!(Arc::strong_count(&a), 2);
+    }
+
+    /// Each kept value counts under its own rule.
+    #[test]
+    fn keep_forever_counts_by_rule() {
+        let before = kept_counts();
+        keep_forever((), Kept::StaleReader);
+        let after = kept_counts();
+        let i = Kept::StaleReader.index();
+        assert!(after.get(i) > before.get(i));
+        assert_eq!(Kept::ALL.get(i), Some(&Kept::StaleReader));
     }
 }

@@ -85,6 +85,18 @@ impl Holds {
         (self.waiting.iter()).any(|waiting| waiting.start < pages.end && pages.start < waiting.end)
     }
 
+    /// The live holds, the unmaps that wait, and the bytes of those unmaps: diagnostics only.
+    pub(super) fn stats(&self) -> (u64, u64, u64) {
+        let waiting_bytes = (self.waiting.iter())
+            .map(|w| w.end.saturating_sub(w.start))
+            .fold(0u64, u64::saturating_add);
+        (
+            self.held.len().try_into().unwrap_or(u64::MAX),
+            self.waiting.len().try_into().unwrap_or(u64::MAX),
+            waiting_bytes,
+        )
+    }
+
     /// The hold `id` on the pages from `first` goes: the unmaps no live hold meets any more,
     /// which the caller makes.
     pub(super) fn release(&mut self, first: u64, id: u64) -> Vec<Range<u64>> {

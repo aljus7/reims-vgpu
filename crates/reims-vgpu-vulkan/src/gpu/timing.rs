@@ -86,17 +86,67 @@ fn elapsed_since(start: MonoTime) -> Duration {
 /// A no-copy buffer import that takes this long or longer is written ([`import`]).
 pub const SLOW_IMPORT: Duration = Duration::from_millis(10);
 
-/// Makes a no-copy buffer over `length` bytes of host memory (`make`), and, where info lines are
-/// on (`REIMS_VGPU_LOG=info`), writes one that took [`SLOW_IMPORT`] or more with the imports
-/// live then, so a log tells whether imports slow down as they pile up. With info lines off it
-/// reads no clock.
-pub fn import<T>(length: u64, make: impl FnOnce() -> T) -> T {
-    if !log::log_enabled!(log::Level::Info) {
+/// The span of each leak line ([`import`]).
+pub const LEAK_SPAN: Duration = Duration::from_secs(10);
+
+/// The no-copy imports since the last leak line: when that span started, how many, their bytes,
+/// and the total and most time of their imports and of their twins ([`twin`]).
+#[derive(Debug, Default)]
+struct ImportSpan {
+    start: Option<MonoTime>,
+    imports: u64,
+    bytes: u64,
+    import_total: Duration,
+    import_most: Duration,
+    twin_total: Duration,
+    twin_most: Duration,
+}
+
+/// The imports since the last leak line.
+static IMPORTS: Mutex<ImportSpan> = Mutex::new(ImportSpan {
+    start: None,
+    imports: 0,
+    bytes: 0,
+    import_total: Duration::ZERO,
+    import_most: Duration::ZERO,
+    twin_total: Duration::ZERO,
+    twin_most: Duration::ZERO,
+});
+
+/// Whether import timing and leak lines are on: info lines (`REIMS_VGPU_LOG=info`).
+fn imports_on() -> bool {
+    log::log_enabled!(log::Level::Info)
+}
+
+/// Makes the memory a no-copy buffer imports, or a writable twin of it (`make`), and, with
+/// [`imports_on`], adds the time it took to the next leak line. With them off it reads no clock.
+pub fn twin<T>(make: impl FnOnce() -> T) -> T {
+    if !imports_on() {
         return make();
     }
     let start = now();
     let made = make();
     let took = elapsed_since(start);
+    let mut span = IMPORTS.lock();
+    span.twin_total = span.twin_total.saturating_add(took);
+    span.twin_most = span.twin_most.max(took);
+    made
+}
+
+/// Makes a no-copy buffer over `length` bytes of host memory (`make`), and, where info lines are
+/// on (`REIMS_VGPU_LOG=info`), writes one that took [`SLOW_IMPORT`] or more with the imports
+/// live then, so a log tells whether imports slow down as they pile up. Every [`LEAK_SPAN`] it
+/// writes a leak line: what lives that a leak would pile up (imports, holds and the unmaps that
+/// wait for them, writable twins, buffers and heaps, textures, values kept for good), and the
+/// span's imports and their times. With info lines off it reads no clock.
+pub fn import<T>(length: u64, make: impl FnOnce() -> T) -> T {
+    if !imports_on() {
+        return make();
+    }
+    let start = now();
+    let made = make();
+    let end = now();
+    let took = end.saturating_duration_since(start);
     if took >= SLOW_IMPORT {
         let (live, bytes) = crate::remap::live_imports();
         log::info!(
@@ -106,7 +156,51 @@ pub fn import<T>(length: u64, make: impl FnOnce() -> T) -> T {
             bytes >> 20
         );
     }
+    let done = {
+        let mut span = IMPORTS.lock();
+        let first = *span.start.get_or_insert(start);
+        span.imports = span.imports.saturating_add(1);
+        span.bytes = span.bytes.saturating_add(length);
+        span.import_total = span.import_total.saturating_add(took);
+        span.import_most = span.import_most.max(took);
+        let elapsed = end.saturating_duration_since(first);
+        (elapsed >= LEAK_SPAN).then(|| (std::mem::take(&mut *span), elapsed))
+    };
+    if let Some((span, elapsed)) = done {
+        log::info!("{}", leak_line(&span, elapsed));
+    }
     made
+}
+
+/// The leak line of `span`, which lasted `elapsed`.
+fn leak_line(span: &ImportSpan, elapsed: Duration) -> String {
+    let (live, live_bytes) = crate::remap::live_imports();
+    let (holds, waiting, waiting_bytes) = crate::remap::held_unmaps();
+    #[cfg(windows)]
+    let (twins, twin_bytes) = crate::os::twins();
+    #[cfg(not(windows))]
+    let (twins, twin_bytes) = (0u64, 0u64);
+    let kept = reims_vgpu_core::raise::kept::kept_counts();
+    let n = span.imports.max(1);
+    let n32 = u32::try_from(n).unwrap_or(u32::MAX);
+    format!(
+        "reims-vgpu leaks: imports live {live} ({} MiB), holds {holds}, waiting unmaps {waiting} \
+         ({} MiB), twins {twins} ({} MiB), buffers+heaps {}, textures {}, kept {kept:?}; \
+         last {:.1} s: {} imports, {} MiB, import avg {:.2} ms max {:.1} ms, twin avg {:.2} ms \
+         max {:.1} ms",
+        live_bytes >> 20,
+        waiting_bytes >> 20,
+        twin_bytes >> 20,
+        crate::gpu::backing::Backing::live(),
+        crate::gpu::metal_space::live_textures(),
+        elapsed.as_secs_f64(),
+        span.imports,
+        span.bytes >> 20,
+        ms(span.import_total / n32),
+        ms(span.import_most),
+        ms(span.twin_total / n32),
+        ms(span.twin_most),
+    )
 }
 
 /// `d` in milliseconds.
@@ -432,6 +526,31 @@ mod tests {
 
     use super::*;
     use crate::gpu::device::tests::dev;
+
+    /// A leak line names each count a leak would pile up, and the span's import times.
+    #[test]
+    fn a_leak_line_names_every_count() {
+        let span = ImportSpan {
+            imports: 4,
+            bytes: 8 << 20,
+            import_total: Duration::from_millis(40),
+            import_most: Duration::from_millis(25),
+            ..ImportSpan::default()
+        };
+        let line = leak_line(&span, Duration::from_secs(10));
+        for part in [
+            "imports live",
+            "waiting unmaps",
+            "twins",
+            "buffers+heaps",
+            "textures",
+            "kept [",
+            "4 imports, 8 MiB",
+            "import avg 10.00 ms max 25.0 ms",
+        ] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
+    }
 
     /// The marker that makes a run of [`slow_work_is_a_debug_line`] the child.
     const CHILD: &str = "REIMS_VGPU_VULKAN_TIMING_CHILD";

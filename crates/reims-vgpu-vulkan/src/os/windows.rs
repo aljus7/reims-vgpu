@@ -14,7 +14,7 @@ pub use super::backing::{GuestMemoryLease, lease_guest_memory};
 pub use super::standin::{StandInSurface as WindowsSurface, StandInSurfaces as WindowsSurfaces};
 pub(crate) use super::standin::{plane_at, plane_shape, recorded_mut, ycbcr_matrix};
 pub use clock::WindowsClock;
-pub(crate) use import::{TWINS_READ_ONLY, allocate_zeros, import_view, shown_at};
+pub(crate) use import::{TWINS_READ_ONLY, allocate_zeros, import_view, shown_at, twins};
 pub use threads::WindowsThreads;
 pub(crate) use vm::OwnMemory;
 

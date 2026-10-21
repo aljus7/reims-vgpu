@@ -1166,6 +1166,7 @@ impl MetalSpace {
     /// A texture made: its descriptor, which grows the mempool where its count reaches the
     /// arrays' ([`Elements`]).
     pub fn texture_made(&mut self) {
+        LIVE_TEXTURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.elements.live += 1;
         let array = self.elements.array;
         if array > 0 && self.elements.live >= array / ELEMENT_BYTES {
@@ -1179,6 +1180,11 @@ impl MetalSpace {
 
     /// A texture gone: its descriptor free again ([`Elements`]).
     pub fn texture_gone(&mut self) {
+        let _ = LIVE_TEXTURES.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |n| n.checked_sub(1),
+        );
         self.elements.live = self.elements.live.saturating_sub(1);
     }
 
@@ -1319,6 +1325,16 @@ impl MetalSpace {
 
 /// The process's space.
 static PROCESS: Mutex<MetalSpace> = Mutex::new(MetalSpace::new());
+
+/// The textures live, as [`MetalSpace::texture_made`] and [`MetalSpace::texture_gone`] count
+/// them, readable without the space's lock, for the leak lines
+/// ([`crate::gpu::timing::import`]).
+static LIVE_TEXTURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The textures live ([`LIVE_TEXTURES`]).
+pub fn live_textures() -> u64 {
+    LIVE_TEXTURES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// The device whose sampler ID pool Metal's sampler mempool follows ([`Samplers`]): the
 /// process's first, the one Metal's device is.

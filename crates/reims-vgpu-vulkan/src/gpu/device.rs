@@ -779,7 +779,8 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
         let token = placing.token();
         // The bytes, or a writable twin of them where the runtime cannot import them as mapped,
         // and what keeps them mapped until the runtime freed its import.
-        let (imported, run, keep, kept) = no_copy_release(start, bytes.len(), run);
+        let (imported, run, keep, kept) =
+            crate::gpu::timing::twin(|| no_copy_release(start, bytes.len(), run));
         let made = crate::gpu::timing::import(bytes.len(), || {
             create(
                 sel,

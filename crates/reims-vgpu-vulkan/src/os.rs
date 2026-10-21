@@ -39,6 +39,8 @@ use std::os::fd::OwnedFd;
 use std::os::windows::io::OwnedHandle;
 use std::sync::Arc;
 
+#[cfg(windows)]
+pub(crate) use host_os::twins;
 pub(crate) use host_os::{
     Drawables, METAL_LEVEL, TWINS_READ_ONLY, allocate_zeros, dma_buf_refusal, host_memory,
     import_view, plane_shape, shown_at,

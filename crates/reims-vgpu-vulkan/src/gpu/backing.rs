@@ -147,7 +147,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use metal2vulkan_runtime as rt;
@@ -173,6 +173,9 @@ const DETACH: &str = "detachBacking";
 /// The runtime rounds a heap's size up to a multiple of this (16 KiB), and the heap's memory
 /// covers all of it.
 pub(crate) const HEAP_GRANULE: u64 = 0x4000;
+
+/// The [`Backing`]s live: diagnostics only ([`Backing::live`]).
+static LIVE_BACKINGS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a buffer or heap is detached (`detachBacking`), and the read-only bit it was made
 /// with, which every alias it takes keeps. Core sends one object's detaches and replaces one at a
@@ -301,6 +304,12 @@ impl Held {
 }
 
 impl Backing {
+    /// The buffers and heaps live: each has one backing, for the leak lines
+    /// ([`crate::gpu::timing::import`]).
+    pub(crate) fn live() -> u64 {
+        LIVE_BACKINGS.load(Ordering::Relaxed)
+    }
+
     /// The attached backing of the runtime buffer `id`, over the memory it was made with;
     /// `read_only` for one made with `MTLResourceOptions` bit 24.
     pub(crate) fn new(read_only: bool, id: rt::ObjectId) -> Backing {
@@ -315,6 +324,7 @@ impl Backing {
 
     /// The attached backing of the runtime buffer or `heap` `id`.
     fn of(read_only: bool, heap: bool, id: rt::ObjectId) -> Backing {
+        LIVE_BACKINGS.fetch_add(1, Ordering::Relaxed);
         Backing {
             detached: AtomicBool::new(false),
             read_only,
@@ -329,6 +339,7 @@ impl Backing {
     /// The backing of an object a detach never detaches: it stays attached, and a replace
     /// answers NO, as Metal's does (module docs).
     pub(crate) fn fixed() -> Backing {
+        LIVE_BACKINGS.fetch_add(1, Ordering::Relaxed);
         Backing {
             detached: AtomicBool::new(false),
             read_only: false,
@@ -527,6 +538,8 @@ impl Drop for Backing {
     /// no-copy buffer never replaced runs its deallocator now where a detach held the run, as
     /// Metal's runs it as the buffer is destroyed ([`Held`]).
     fn drop(&mut self) {
+        let _ =
+            LIVE_BACKINGS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
         if self.is_detached()
             && let Some(id) = self.id
         {
@@ -1035,12 +1048,7 @@ pub(crate) fn gather(
         pages = run.offset + run.length;
     }
     if let Err(kr) = vm.remap_shared_overwrite_many(&pieces) {
-        refused_by_host(
-            sel,
-            "a remap of the guest's pages into an alias",
-            pages,
-            kr,
-        );
+        refused_by_host(sel, "a remap of the guest's pages into an alias", pages, kr);
     }
     if read_only {
         if crate::os::TWINS_READ_ONLY {

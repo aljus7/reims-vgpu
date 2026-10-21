@@ -271,6 +271,12 @@ pub(crate) fn live_imports() -> (u64, u64) {
     )
 }
 
+/// The holds on imported pages, the unmaps that wait for them, and those unmaps' bytes, for the
+/// leak lines ([`crate::gpu::timing::import`]).
+pub(crate) fn held_unmaps() -> (u64, u64, u64) {
+    HOLDS.lock().stats()
+}
+
 /// A hold on the host pages a runtime import covers, which the runtime is given in a no-copy
 /// buffer's keep-alive: while it lives, [`VulkanVm`]'s `deallocate` of pages it meets leaves them
 /// mapped, and its drop, which the runtime makes once it freed the import, unmaps them (module
