@@ -32,6 +32,14 @@ use. The release does not contain Apple media. No build tools and no .NET instal
 always on), lists your VMs and starts or shuts them down. It is only a front end for the
 PowerShell scripts in `scripts\windows`, so it must stay inside the install (or source) folder.
 
+## The VM window
+
+- **Ctrl+Alt+F** switches the VM window to full screen on its monitor and back. The F key is
+  not passed to macOS; Ctrl and Alt are.
+- Click into the window to capture the keyboard and mouse; **Ctrl+Alt+Win** releases them.
+- To always start full screen, set `REIMS_VGPU_WINDOW_BORDERLESS=1` before `start.ps1`
+  (Ctrl+Alt+F then leaves full screen).
+
 ## Two guest scripts (required once, optional afterwards)
 
 Without `METAL_ERROR_MODE=5` a fresh install shows no Dock and blank icons. `prepare-tools.ps1`

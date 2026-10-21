@@ -350,6 +350,10 @@ runtime's own device. The switches above apply, and `resolution=` too.
   guest; Ctrl+Alt+Super releases on Linux (Ctrl+Alt+Win on Windows); losing the keyboard releases; the title
   says so. `test: native::linux::input::a_click_in_the_image_captures_and_is_sent`,
   `test: native::linux::input::ctrl_alt_super_releases_capture`, `manual` (the grab)
+- Full screen: Ctrl+Alt+F, captured or not, takes the window into the
+  desktop's full screen on its screen and back; the chord's F does not
+  reach the guest. `test: native::linux::sdl::ctrl_alt_f_is_the_full_screen_chord`,
+  `manual` (the switch)
 - Scrolling: the wheel's notches, or, where the host takes smooth
   scrolling, its lines at 10 points each, in no gesture (SDL gives no
   phases); the guest gets the device's own direction.

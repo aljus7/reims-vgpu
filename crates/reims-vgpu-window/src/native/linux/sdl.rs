@@ -14,6 +14,9 @@
 //!
 //! **Borderless**: through the compositor's own full screen on its screen, over its panels.
 //!
+//! **Full screen** at any time: Ctrl+Alt+F takes a window into the desktop's full screen on its
+//! screen and back ([`toggle_full_screen`]); the chord's F never reaches the guest.
+//!
 //! **The surface.** The window is made for Vulkan: its render thread makes the window's Vulkan
 //! surface of SDL's window (`super::render`), so SDL's window goes only once that thread has let
 //! its swapchain and surface go ([`close`], `crate::sdl::shell::released`).
@@ -262,6 +265,12 @@ pub(crate) fn input_event(shell: &mut Shell, kind: u32, event: &SDL_Event) -> bo
         k if k == SDL_EVENT_KEY_DOWN.0 || k == SDL_EVENT_KEY_UP.0 => {
             // SAFETY: a key event.
             let key = unsafe { event.key };
+            if is_full_screen_chord(key.scancode, key.r#mod) {
+                if key.down && !key.repeat {
+                    toggle_full_screen(shell);
+                }
+                return false;
+            }
             keymap::usb_usage(key.scancode.0).is_some_and(|usage| {
                 shell
                     .input
@@ -271,6 +280,39 @@ pub(crate) fn input_event(shell: &mut Shell, kind: u32, event: &SDL_Event) -> bo
             })
         }
         _ => false,
+    }
+}
+
+/// Whether a key with `scancode`, while modifiers `mods` are held, is the full-screen chord:
+/// Ctrl+Alt+F, without Shift or Super. Neither its down nor its up reaches the guest.
+fn is_full_screen_chord(scancode: SDL_Scancode, mods: SDL_Keymod) -> bool {
+    scancode == SDL_SCANCODE_F
+        && mods & SDL_KMOD_CTRL != 0
+        && mods & SDL_KMOD_ALT != 0
+        && mods & (SDL_KMOD_SHIFT | SDL_KMOD_GUI) == 0
+}
+
+/// Takes the window into the desktop's full screen on its screen, or back to the window it was.
+fn toggle_full_screen(shell: &mut Shell) {
+    // SAFETY: the window is SDL's, on this thread.
+    let full = unsafe { SDL_GetWindowFlags(shell.sdl) } & SDL_WINDOW_FULLSCREEN != 0;
+    // SAFETY: as above; no exclusive mode is set, so full screen is the desktop's.
+    let done = unsafe { SDL_SetWindowFullscreen(shell.sdl, !full) };
+    if done {
+        log::info!(
+            target: "reims_vgpu_window",
+            "window {:?}: full screen {}",
+            shell.window.title(),
+            if full { "off" } else { "on" }
+        );
+    } else {
+        log::warn!(
+            target: "reims_vgpu_window",
+            "window {:?}: full screen {}: {}",
+            shell.window.title(),
+            !full,
+            crate::sdl::sdl_error()
+        );
     }
 }
 
@@ -304,6 +346,34 @@ mod tests {
     use super::*;
     use crate::geometry::Rect;
     use crate::keys::KeyEvent;
+
+    /// Ctrl+Alt+F is the full-screen chord, on either side's modifiers; F alone, or with Shift or
+    /// Super added, or another key under Ctrl+Alt, is not
+    #[test]
+    fn ctrl_alt_f_is_the_full_screen_chord() {
+        assert!(is_full_screen_chord(
+            SDL_SCANCODE_F,
+            SDL_KMOD_LCTRL | SDL_KMOD_LALT
+        ));
+        assert!(is_full_screen_chord(
+            SDL_SCANCODE_F,
+            SDL_KMOD_RCTRL | SDL_KMOD_RALT | SDL_KMOD_NUM
+        ));
+        assert!(!is_full_screen_chord(SDL_SCANCODE_F, SDL_KMOD_NONE));
+        assert!(!is_full_screen_chord(SDL_SCANCODE_F, SDL_KMOD_LCTRL));
+        assert!(!is_full_screen_chord(
+            SDL_SCANCODE_F,
+            SDL_KMOD_LCTRL | SDL_KMOD_LALT | SDL_KMOD_LSHIFT
+        ));
+        assert!(!is_full_screen_chord(
+            SDL_SCANCODE_F,
+            SDL_KMOD_LCTRL | SDL_KMOD_LALT | SDL_KMOD_LGUI
+        ));
+        assert!(!is_full_screen_chord(
+            SDL_SCANCODE_G,
+            SDL_KMOD_LCTRL | SDL_KMOD_LALT
+        ));
+    }
 
     /// The person's close lets the input go before the shell tells the host
     /// (`shell::Shell::close_requested`): a held key and button go up, queued for the host, and
