@@ -473,7 +473,20 @@ impl<P: Platform> LocalTask<P> {
         fifo_event_value: &Arc<AtomicU64>,
         done: Completion,
     ) -> RaiseResult<()> {
+        let lock_timed = timing::enabled();
+        let lock_clock = self.platform.clock();
+        let lock_waiting = lock_timed.then(|| lock_clock.now_mono());
         let _lock = self.base.mutex.read();
+        if let Some(waiting) = lock_waiting {
+            let waited = lock_clock.now_mono().saturating_duration_since(waiting);
+            if waited >= timing::SLOW_CREATION {
+                log::info!(
+                    "reims-vgpu timing: task {}: an exec waited {} ms for the task lock",
+                    self.task_id,
+                    waited.as_millis()
+                );
+            }
+        }
         let (deserializer, _, lists) = self.parts();
         if !lists.ensure_mapped(hold) {
             done(ExecStatus::FAIL, None);

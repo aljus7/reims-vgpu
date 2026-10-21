@@ -387,7 +387,37 @@ impl<P: Platform> ResourceManager<P> {
         hold: Hold<'_>,
         reference: u32,
     ) -> RaiseResult<Result<Option<K::Obj>, String>> {
+        let timed = crate::timing::enabled();
+        let clock = self.platform.clock();
+        let waiting = timed.then(|| clock.now_mono());
         let _creation = self.creation.lock();
+        let started = timed.then(|| clock.now_mono());
+        let made = self.new_object_locked::<K>(hold, reference);
+        if let (Some(waiting), Some(started)) = (waiting, started) {
+            let finished = clock.now_mono();
+            let total = finished.saturating_duration_since(waiting);
+            if total >= crate::timing::SLOW_CREATION {
+                log::info!(
+                    "reims-vgpu timing: object {reference} ({}) took {} ms to look up: creation \
+                     lock wait {} ms, make {} ms",
+                    std::any::type_name::<K>()
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or("?"),
+                    total.as_millis(),
+                    started.saturating_duration_since(waiting).as_millis(),
+                    finished.saturating_duration_since(started).as_millis(),
+                );
+            }
+        }
+        made
+    }
+
+    fn new_object_locked<K: ManagedKind<P>>(
+        &self,
+        hold: Hold<'_>,
+        reference: u32,
+    ) -> RaiseResult<Result<Option<K::Obj>, String>> {
         if let Some(object) = self.probe::<K>(reference) {
             return Ok(Ok(Some(object)));
         }
@@ -532,15 +562,36 @@ impl<P: Platform> ResourceManager<P> {
         reference: u32,
         clear_placement: bool,
     ) {
+        let timed = crate::timing::enabled();
+        let clock = self.platform.clock();
+        let waiting = timed.then(|| clock.now_mono());
         let _creation = self.creation.lock();
-        let now = self.platform.clock().now_mono();
+        let now = clock.now_mono();
         let resource = TypeId::of::<K>() == TypeId::of::<Resources>();
         let released = self.with_caches(|c| {
             let removed = K::sub_manager_mut(c).remove(reference);
             c.retired
                 .retire(TypeId::of::<K>(), reference, removed, resource, now)
         });
+        let count = released.len();
+        let freeing = timed.then(|| clock.now_mono());
         drop(released);
+        if let (Some(waiting), Some(freeing)) = (waiting, freeing) {
+            let finished = clock.now_mono();
+            if finished.saturating_duration_since(waiting) >= crate::timing::SLOW_CREATION {
+                log::info!(
+                    "reims-vgpu timing: delete of object {reference} ({}) took {} ms: creation \
+                     lock wait {} ms, releasing {count} retired objects {} ms",
+                    std::any::type_name::<K>()
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or("?"),
+                    finished.saturating_duration_since(waiting).as_millis(),
+                    now.saturating_duration_since(waiting).as_millis(),
+                    finished.saturating_duration_since(freeing).as_millis(),
+                );
+            }
+        }
         if clear_placement {
             self.clear_placement_list_entry(hold, reference);
         }

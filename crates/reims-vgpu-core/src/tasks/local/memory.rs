@@ -14,6 +14,7 @@ use crate::memory::mapping::Mapping;
 use crate::memory::tracker::RangeTracker;
 use crate::num::{ToU64, ToUsize};
 use crate::platform::Platform;
+use crate::platform::os::clock::Clock;
 use crate::platform::device::GpuDevice;
 use crate::raise::{Kept, keep_forever};
 use crate::raise::{OnFault, RaiseResult};
@@ -305,12 +306,18 @@ impl<P: Platform> LocalTask<P> {
         page: u32,
         length: u64,
     ) -> RaiseResult<P::Buffer> {
+        let timed = crate::timing::enabled();
+        let clock = self.platform.clock();
+        let now = || timed.then(|| clock.now_mono());
+        let started = now();
+        let mapped;
         let device = self.base.mtl_device.as_deref();
         let buffer = if let Backend::Blocks { .. } = self.backend {
             // The blocks setup: the host's task maps it, and no mapping comes back.
             let pointer = self
                 .mapped_address(hold, page_address(page), length, false)?
                 .address;
+            mapped = now();
             if pointer.is_null() {
                 return raise_caught(
                     RaiseKind::NullAddress,
@@ -334,6 +341,7 @@ impl<P: Platform> LocalTask<P> {
                     format_args!("no host address for task page {page:#x}"),
                 );
             };
+            mapped = now();
             let pointer = mapping.virtual_address();
             let owned = Arc::clone(&mapping);
             let deallocator = Box::new(move || drop(owned));
@@ -365,6 +373,12 @@ impl<P: Platform> LocalTask<P> {
                 }
             }
         };
+        if let (Some(started), Some(mapped), Some(made)) = (started, mapped, now()) {
+            crate::timing::add_page_buffer(
+                mapped.saturating_duration_since(started),
+                made.saturating_duration_since(mapped),
+            );
+        }
         match buffer {
             Some(buffer) => Ok(buffer),
             None => raise_caught(

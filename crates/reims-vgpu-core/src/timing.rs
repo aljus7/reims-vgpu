@@ -14,6 +14,10 @@ pub const SLOW_EXEC: Duration = Duration::from_millis(100);
 /// A pipeline creation that took this long is logged on its own.
 pub const SLOW_PIPELINE: Duration = Duration::from_millis(50);
 
+/// An object lookup that made the object, a guest delete, or a wait for a task's lock that took
+/// this long is logged on its own.
+pub const SLOW_CREATION: Duration = Duration::from_millis(20);
+
 thread_local! {
     /// The pipeline creations on this thread since the last [`take_pipelines`]: their count
     /// and their total nanoseconds.
