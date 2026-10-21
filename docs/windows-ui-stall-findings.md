@@ -416,3 +416,9 @@ and deallocate):
 
 Fewer views per buffer (reusing a mapping when the same guest pages come back) is the remaining
 lever; it is a design change, not done.
+
+Tried and dropped (soak 12): keeping a task's last 64 page-buffer mappings and reusing one when a
+page buffer has exactly the same physical runs. In 4 minutes of the workload only 145 of 22,286
+page buffers (0.6%) matched one, so reuse cannot remove the view churn. The page buffers land on
+different guest pages each time; fewer views would need a different paging design (for example
+blits from one import of all guest RAM with a region per run, or CPU copies for small buffers).
